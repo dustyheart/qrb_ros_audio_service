@@ -40,16 +40,29 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
 
   latency_log_enabled_ = this->declare_parameter<bool>("enable_latency_log", false);
 
+  declare_backend_parameters();
+  apply_backend_parameters();
+
   param_callback_handle_ =
       this->add_on_set_parameters_callback([this](const std::vector<rclcpp::Parameter> & params) {
         rcl_interfaces::msg::SetParametersResult result;
         result.successful = true;
+        bool backend_param_changed = false;
         for (const auto & param : params) {
           if (param.get_name() == "enable_latency_log") {
             latency_log_enabled_ = param.as_bool();
             RCLCPP_INFO(this->get_logger(), "enable_latency_log set to %s",
                 latency_log_enabled_ ? "true" : "false");
+          } else if (param.get_name() == "capture_device" || param.get_name() == "playback_device" ||
+                     param.get_name() == "capture_fragment_duration_ms" ||
+                     param.get_name() == "playback_buffer_duration_ms") {
+            backend_param_changed = true;
           }
+        }
+        if (backend_param_changed) {
+          // Only affects streams created after this point; existing streams keep
+          // the config they were opened with.
+          apply_backend_parameters();
         }
         return result;
       });
@@ -280,6 +293,44 @@ void AudioServer::service_callback(const std::shared_ptr<rmw_request_id_t> reque
   }
 
   response->success = ret;
+}
+
+void AudioServer::declare_backend_parameters()
+{
+  rcl_interfaces::msg::ParameterDescriptor device_desc;
+  device_desc.description =
+      "PipeWire/PulseAudio source(capture)/sink(playback) name. Empty means use the "
+      "backend's default device. See `pactl list sources/sinks short` (or the "
+      "pipewire-pulse equivalent) for valid names.";
+
+  rcl_interfaces::msg::ParameterDescriptor capture_fragment_desc;
+  capture_fragment_desc.description =
+      "Capture fragment size requested from the backend, in milliseconds. Lower values "
+      "reduce latency at the cost of more frequent wakeups. 0 means use the library default "
+      "(80ms).";
+
+  rcl_interfaces::msg::ParameterDescriptor playback_buffer_desc;
+  playback_buffer_desc.description =
+      "Playback pre-buffer/minreq size requested from the backend, in milliseconds. 0 means "
+      "use the library default (300ms).";
+
+  this->declare_parameter<std::string>("capture_device", "", device_desc);
+  this->declare_parameter<std::string>("playback_device", "", device_desc);
+  this->declare_parameter<int>("capture_fragment_duration_ms", 0, capture_fragment_desc);
+  this->declare_parameter<int>("playback_buffer_duration_ms", 0, playback_buffer_desc);
+}
+
+void AudioServer::apply_backend_parameters()
+{
+  qrb::audio_manager::AudioBackendDefaults defaults;
+  defaults.capture_device = this->get_parameter("capture_device").as_string();
+  defaults.playback_device = this->get_parameter("playback_device").as_string();
+  defaults.capture_fragment_duration_ms =
+      static_cast<uint32_t>(this->get_parameter("capture_fragment_duration_ms").as_int());
+  defaults.playback_buffer_duration_ms =
+      static_cast<uint32_t>(this->get_parameter("playback_buffer_duration_ms").as_int());
+
+  AudioManager::set_backend_defaults(defaults);
 }
 
 void AudioServer::shutdown_callback()

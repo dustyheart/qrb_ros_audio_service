@@ -24,6 +24,8 @@ namespace audio_common_lib
 #define TIME_EVENT_USEC 50000
 #define STREAM_VOL_MAX 100
 #define STREAM_VOL_MIN 0
+#define DEFAULT_PLAYBACK_BUFFER_DURATION_MS 300
+#define DEFAULT_CAPTURE_FRAGMENT_DURATION_MS 80
 
 class PulseCommonStream : public IAudioStream
 {
@@ -43,7 +45,9 @@ protected:
   static std::set<PulseCommonStream *> timestamp_streams_;
   int file_fd_ = 0;
 
-  PulseCommonStream(std::string filepath, std::shared_ptr<pa_sample_spec> sample_spec);
+  PulseCommonStream(std::string filepath,
+      std::shared_ptr<pa_sample_spec> sample_spec,
+      std::string device = "");
   void init_pulse_stream();
   static void pulse_stream_update_timing_callback(pa_stream * stream, int success, void * userdata);
   static void pulse_context_time_event_callback(pa_mainloop_api * m,
@@ -64,6 +68,7 @@ public:
   pa_usec_t start_usec = 0;
 
   std::string file_path;
+  std::string device;
   SNDFILE * snd_file = nullptr;
 
   virtual ~PulseCommonStream();
@@ -87,22 +92,34 @@ public:
 class PlaybackStream : public PulseCommonStream
 {
 public:
-  PlaybackStream(std::string filepath, std::shared_ptr<pa_sample_spec> sample_spec);
+  PlaybackStream(std::string filepath,
+      std::shared_ptr<pa_sample_spec> sample_spec,
+      std::string device = "",
+      uint32_t buffer_duration_ms = DEFAULT_PLAYBACK_BUFFER_DURATION_MS);
   virtual int sndfile_open();
   int start_stream() override;
   int write_data(const void * buf, size_t size) override;
   static void stream_data_callback(pa_stream * stream, size_t length, void * userdata);
   size_t sndfile_transfer_data(void * data, size_t length);
+
+private:
+  uint32_t buffer_duration_ms_ = DEFAULT_PLAYBACK_BUFFER_DURATION_MS;
 };
 
 class CaptureStream : public PulseCommonStream
 {
 public:
-  CaptureStream(std::string filepath, std::shared_ptr<pa_sample_spec> sample_spec);
+  CaptureStream(std::string filepath,
+      std::shared_ptr<pa_sample_spec> sample_spec,
+      std::string device = "",
+      uint32_t fragment_duration_ms = DEFAULT_CAPTURE_FRAGMENT_DURATION_MS);
   virtual int sndfile_open();
   int start_stream() override;
   static void stream_data_callback(pa_stream * stream, size_t length, void * userdata);
   size_t sndfile_transfer_data(const void * data, size_t length);
+
+private:
+  uint32_t fragment_duration_ms_ = DEFAULT_CAPTURE_FRAGMENT_DURATION_MS;
 };
 
 }  // namespace audio_common_lib

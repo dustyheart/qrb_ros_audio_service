@@ -72,6 +72,17 @@ extern std::map<std::string, AudioManagerPlayMode> audio_manager_play_mode;
 using stream_data_cb_t =
     std::function<void(uint32_t, std::shared_ptr<std::vector<uint8_t>>, uint64_t)>;
 
+// Backend (PipeWire/PulseAudio) level defaults applied to every stream created
+// through this process. These are node-level ROS parameters rather than
+// per-request fields, since AudioRequest does not carry a device/buffer config.
+struct AudioBackendDefaults
+{
+  std::string capture_device;
+  std::string playback_device;
+  uint32_t capture_fragment_duration_ms = 0;
+  uint32_t playback_buffer_duration_ms = 0;
+};
+
 class AudioManager : public IAudioManager
 {
 public:
@@ -99,6 +110,8 @@ public:
   bool write_stream(uint32_t stream_handle, const void * data, size_t size) override;
   const std::map<std::string, std::string> & get_buildin_sounds() override;
   static void set_stream_data_callback(stream_data_cb_t cb);
+  static void set_backend_defaults(const AudioBackendDefaults & defaults);
+  static const AudioBackendDefaults & get_backend_defaults();
   static void on_task_completed(int domain,
       uint32_t stream_handle,
       uint32_t audio_domain_handle,
@@ -116,6 +129,7 @@ private:
   }
   static AudioManager * instance_;
   static stream_data_cb_t stream_data_cb_;
+  static AudioBackendDefaults backend_defaults_;
   std::unordered_map<uint32_t, std::shared_ptr<Stream>> streams_{};
   std::map<std::string, std::string> buildin_sounds_{};
   MessageQueue queue_;

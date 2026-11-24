@@ -15,8 +15,6 @@
 
 using namespace std;
 
-#define PLAYBACK_BUFFER_DURATION_MS 300
-#define CAPTURE_FRAGMENT_DURATION_MS 80
 #define RECORD_GAIN 8
 
 namespace qrb
@@ -279,8 +277,10 @@ void PulseCommonStream::check_context_ready()
   }
 }
 
-PulseCommonStream::PulseCommonStream(string filepath, std::shared_ptr<pa_sample_spec> sample_spec)
-  : file_path(filepath), sample_spec(sample_spec)
+PulseCommonStream::PulseCommonStream(string filepath,
+    std::shared_ptr<pa_sample_spec> sample_spec,
+    string device)
+  : sample_spec(sample_spec), file_path(filepath), device(device)
 {
   if (PulseCommonStream::pulse_context_ == nullptr) {
     PulseCommonStream::init_pulse_env();
@@ -349,12 +349,21 @@ uint32_t PulseCommonStream::audio_stream_open(const AudioStreamInfo & stream_inf
   }
 
   try {
-    if (stream_info.type == StreamType::Playback)
-      stream = new PlaybackStream(string(stream_info.file_path), streasample_spec);
-    else if (stream_info.type == StreamType::Capture)
-      stream = new CaptureStream(string(stream_info.file_path), streasample_spec);
-    else
+    if (stream_info.type == StreamType::Playback) {
+      uint32_t buffer_duration_ms = stream_info.buffer_duration_ms
+                                         ? stream_info.buffer_duration_ms
+                                         : DEFAULT_PLAYBACK_BUFFER_DURATION_MS;
+      stream = new PlaybackStream(
+          string(stream_info.file_path), streasample_spec, stream_info.device, buffer_duration_ms);
+    } else if (stream_info.type == StreamType::Capture) {
+      uint32_t fragment_duration_ms = stream_info.fragment_duration_ms
+                                           ? stream_info.fragment_duration_ms
+                                           : DEFAULT_CAPTURE_FRAGMENT_DURATION_MS;
+      stream = new CaptureStream(
+          string(stream_info.file_path), streasample_spec, stream_info.device, fragment_duration_ms);
+    } else {
       stream = nullptr;
+    }
   } catch (const std::runtime_error & e) {
     LOGE("create stream error:%s", e.what());
     stream = nullptr;
@@ -526,8 +535,11 @@ static void stream_drain_complete(pa_stream * stream, int success, void * userda
   }
 }
 
-PlaybackStream::PlaybackStream(string filepath, std::shared_ptr<pa_sample_spec> sample_spec)
-  : PulseCommonStream(filepath, sample_spec)
+PlaybackStream::PlaybackStream(string filepath,
+    std::shared_ptr<pa_sample_spec> sample_spec,
+    string device,
+    uint32_t buffer_duration_ms)
+  : PulseCommonStream(filepath, sample_spec, device), buffer_duration_ms_(buffer_duration_ms)
 {
   if (!filepath.empty()) {
     if (sndfile_open())
@@ -561,15 +573,16 @@ int PlaybackStream::start_stream()
   buffer_attr.maxlength = (uint32_t)-1;
   buffer_attr.tlength = (uint32_t)-1;
   buffer_attr.prebuf =
-      pa_usec_to_bytes(PLAYBACK_BUFFER_DURATION_MS * PA_USEC_PER_MSEC, sample_spec.get());
+      pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
   buffer_attr.minreq =
-      pa_usec_to_bytes(PLAYBACK_BUFFER_DURATION_MS * PA_USEC_PER_MSEC, sample_spec.get());
+      pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
   buffer_attr.fragsize = (uint32_t)-1;
 
   pa_cvolume_set(&volume, sample_spec->channels, PA_VOLUME_NORM * stream_volume / STREAM_VOL_MAX);
 
+  const char * sink_name = device.empty() ? nullptr : device.c_str();
   if (pa_stream_connect_playback(
-          get_stream_handle(), nullptr, &buffer_attr, flags, &volume, nullptr)) {
+          get_stream_handle(), sink_name, &buffer_attr, flags, &volume, nullptr)) {
     LOGE("pa_stream_connect_playback() failed: %s",
         pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
     return -EIO;
@@ -712,8 +725,11 @@ void PlaybackStream::stream_data_callback(pa_stream * stream, size_t length, voi
   }
 }
 
-CaptureStream::CaptureStream(string filepath, std::shared_ptr<pa_sample_spec> sample_spec)
-  : PulseCommonStream(filepath, sample_spec)
+CaptureStream::CaptureStream(string filepath,
+    std::shared_ptr<pa_sample_spec> sample_spec,
+    string device,
+    uint32_t fragment_duration_ms)
+  : PulseCommonStream(filepath, sample_spec, device), fragment_duration_ms_(fragment_duration_ms)
 {
   if (!file_path.empty()) {
     if (sndfile_open()) {
@@ -747,7 +763,7 @@ int CaptureStream::start_stream()
 
   buffer_attr.maxlength = (uint32_t)-1;
   buffer_attr.fragsize =
-      pa_usec_to_bytes(CAPTURE_FRAGMENT_DURATION_MS * PA_USEC_PER_MSEC, sample_spec.get());
+      pa_usec_to_bytes(fragment_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
   buffer_attr.prebuf = (uint32_t)-1;
   buffer_attr.tlength = (uint32_t)-1;
   buffer_attr.minreq = (uint32_t)-1;
@@ -755,7 +771,8 @@ int CaptureStream::start_stream()
   pa_cvolume_set(&volume, sample_spec->channels,
       PA_VOLUME_NORM * stream_volume / STREAM_VOL_MAX * RECORD_GAIN);
 
-  if (pa_stream_connect_record(stream, nullptr, &buffer_attr, flags)) {
+  const char * source_name = device.empty() ? nullptr : device.c_str();
+  if (pa_stream_connect_record(stream, source_name, &buffer_attr, flags)) {
     LOGE("pa_stream_connect_record() failed: %s",
         pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
     return -EIO;

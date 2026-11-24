@@ -44,6 +44,7 @@ std::map<std::string, AudioManagerPlayMode> audio_manager_play_mode {
 
 AudioManager * AudioManager::instance_ = nullptr;
 stream_data_cb_t AudioManager::stream_data_cb_ = nullptr;
+AudioBackendDefaults AudioManager::backend_defaults_{};
 
 static stream_data_cb_t g_stream_data_cb = nullptr;
 
@@ -64,14 +65,19 @@ static bool audio_common_stream_cb(const void * const payload,
       info.volume = configs->volume;
       info.repeat = configs->repeat;
 
+      const auto & backend_defaults = AudioManager::get_backend_defaults();
       if (configs->type == StreamType::PLAYBACK) {
         info.type = qrb::audio_common_lib::StreamType::Playback;
         info.file_path = configs->source;
+        info.device = backend_defaults.playback_device;
+        info.buffer_duration_ms = backend_defaults.playback_buffer_duration_ms;
         if (!configs->subs_name.empty())
           info.pcm_mode = true;
       } else {
         info.type = qrb::audio_common_lib::StreamType::Capture;
         info.file_path = configs->source;
+        info.device = backend_defaults.capture_device;
+        info.fragment_duration_ms = backend_defaults.capture_fragment_duration_ms;
         if (configs->pub_pcm || !configs->pub_name.empty())
           info.pcm_mode = true;
       }
@@ -136,6 +142,22 @@ void AudioManager::set_stream_data_callback(stream_data_cb_t cb)
 {
   stream_data_cb_ = cb;
   g_stream_data_cb = cb;
+}
+
+void AudioManager::set_backend_defaults(const AudioBackendDefaults & defaults)
+{
+  backend_defaults_ = defaults;
+  AM_LOGI(LOG_TAG, "backend defaults updated: capture_device='"
+                       << defaults.capture_device << "', playback_device='"
+                       << defaults.playback_device << "', capture_fragment_duration_ms="
+                       << defaults.capture_fragment_duration_ms
+                       << ", playback_buffer_duration_ms="
+                       << defaults.playback_buffer_duration_ms);
+}
+
+const AudioBackendDefaults & AudioManager::get_backend_defaults()
+{
+  return backend_defaults_;
 }
 
 bool AudioManager::write_stream(uint32_t stream_handle, const void * data, size_t size)

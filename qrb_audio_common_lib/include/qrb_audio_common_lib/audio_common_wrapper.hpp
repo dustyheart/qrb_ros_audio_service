@@ -50,6 +50,10 @@ struct AudioStreamInfo
   bool need_timestamp = false;
   bool pcm_mode = false;
   int32_t repeat = 0;
+  // Capture fragment size, in ms. 0 means "use backend default".
+  uint32_t fragment_duration_ms = 0;
+  // Playback pre-buffer size, in ms. 0 means "use backend default".
+  uint32_t buffer_duration_ms = 0;
 };
 
 using stream_event_callback_func = std::function<void(StreamEvent, StreamEventData, void *)>;
