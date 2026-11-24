@@ -70,7 +70,10 @@ private:
       uint64_t latency_usec);
   void on_latency_log_timer();
   void declare_backend_parameters();
-  void apply_backend_parameters();
+  // If pending is non-null, values for names present in it take priority over
+  // this->get_parameter() (which, when called from an on_set_parameters
+  // callback, would still return the pre-change value - see call site).
+  void apply_backend_parameters(const std::vector<rclcpp::Parameter> * pending = nullptr);
 };
 
 }  // namespace audio_service

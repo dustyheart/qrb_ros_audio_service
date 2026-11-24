@@ -60,9 +60,13 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
           }
         }
         if (backend_param_changed) {
-          // Only affects streams created after this point; existing streams keep
-          // the config they were opened with.
-          apply_backend_parameters();
+          // rclcpp invokes on_set_parameters callbacks BEFORE committing the new
+          // values, so this->get_parameter() below would still return the OLD
+          // value for whatever is in `params`. Pass the pending params through so
+          // apply_backend_parameters() can prefer them over the (still-stale)
+          // stored values. Only affects streams created after this point;
+          // existing streams keep the config they were opened with.
+          apply_backend_parameters(&params);
         }
         return result;
       });
@@ -303,16 +307,26 @@ void AudioServer::declare_backend_parameters()
       "backend's default device. See `pactl list sources/sinks short` (or the "
       "pipewire-pulse equivalent) for valid names.";
 
+  // Upper bound is arbitrary but keeps a fat-fingered value (or a negative one,
+  // see below) from turning into a multi-second buffer or, after the uint32_t
+  // cast, wrapping into a huge fragsize/prebuf passed straight to PulseAudio.
+  rcl_interfaces::msg::IntegerRange duration_range;
+  duration_range.from_value = 0;
+  duration_range.to_value = 2000;
+  duration_range.step = 1;
+
   rcl_interfaces::msg::ParameterDescriptor capture_fragment_desc;
   capture_fragment_desc.description =
       "Capture fragment size requested from the backend, in milliseconds. Lower values "
       "reduce latency at the cost of more frequent wakeups. 0 means use the library default "
       "(80ms).";
+  capture_fragment_desc.integer_range = { duration_range };
 
   rcl_interfaces::msg::ParameterDescriptor playback_buffer_desc;
   playback_buffer_desc.description =
       "Playback pre-buffer/minreq size requested from the backend, in milliseconds. 0 means "
       "use the library default (300ms).";
+  playback_buffer_desc.integer_range = { duration_range };
 
   this->declare_parameter<std::string>("capture_device", "", device_desc);
   this->declare_parameter<std::string>("playback_device", "", device_desc);
@@ -320,15 +334,47 @@ void AudioServer::declare_backend_parameters()
   this->declare_parameter<int>("playback_buffer_duration_ms", 0, playback_buffer_desc);
 }
 
-void AudioServer::apply_backend_parameters()
+namespace
+{
+// Prefers the value for `name` from `pending` (parameters an on_set_parameters
+// callback is currently validating, not yet committed) and falls back to
+// `node`'s already-committed value otherwise.
+std::string pending_or_current_string(rclcpp::Node * node,
+    const std::vector<rclcpp::Parameter> * pending,
+    const std::string & name)
+{
+  if (pending) {
+    for (const auto & param : *pending) {
+      if (param.get_name() == name)
+        return param.as_string();
+    }
+  }
+  return node->get_parameter(name).as_string();
+}
+
+int64_t pending_or_current_int(rclcpp::Node * node,
+    const std::vector<rclcpp::Parameter> * pending,
+    const std::string & name)
+{
+  if (pending) {
+    for (const auto & param : *pending) {
+      if (param.get_name() == name)
+        return param.as_int();
+    }
+  }
+  return node->get_parameter(name).as_int();
+}
+}  // namespace
+
+void AudioServer::apply_backend_parameters(const std::vector<rclcpp::Parameter> * pending)
 {
   qrb::audio_manager::AudioBackendDefaults defaults;
-  defaults.capture_device = this->get_parameter("capture_device").as_string();
-  defaults.playback_device = this->get_parameter("playback_device").as_string();
-  defaults.capture_fragment_duration_ms =
-      static_cast<uint32_t>(this->get_parameter("capture_fragment_duration_ms").as_int());
-  defaults.playback_buffer_duration_ms =
-      static_cast<uint32_t>(this->get_parameter("playback_buffer_duration_ms").as_int());
+  defaults.capture_device = pending_or_current_string(this, pending, "capture_device");
+  defaults.playback_device = pending_or_current_string(this, pending, "playback_device");
+  defaults.capture_fragment_duration_ms = static_cast<uint32_t>(
+      pending_or_current_int(this, pending, "capture_fragment_duration_ms"));
+  defaults.playback_buffer_duration_ms = static_cast<uint32_t>(
+      pending_or_current_int(this, pending, "playback_buffer_duration_ms"));
 
   AudioManager::set_backend_defaults(defaults);
 }
