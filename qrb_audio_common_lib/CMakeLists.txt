@@ -15,6 +15,7 @@ add_library(${PROJECT_NAME} SHARED
   src/alsa_stream.cpp
   src/pulse_stream.cpp
   src/audio_common_wrapper.cpp
+  src/core/processing_pipeline.cpp
 )
 
 target_include_directories(${PROJECT_NAME}
@@ -40,6 +41,18 @@ install(FILES
   include/${PROJECT_NAME}/audio_common_wrapper.hpp
   DESTINATION include/${PROJECT_NAME}
 )
+
+install(DIRECTORY include/${PROJECT_NAME}/core
+  DESTINATION include/${PROJECT_NAME}
+)
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(core_pipeline_test test/core_pipeline_test.cpp)
+  target_include_directories(core_pipeline_test PRIVATE include)
+  target_link_libraries(core_pipeline_test ${PROJECT_NAME})
+  add_test(NAME core_pipeline_test COMMAND core_pipeline_test)
+endif()
 
 install(TARGETS ${PROJECT_NAME}
   EXPORT ${PROJECT_NAME}Config

@@ -1,0 +1,88 @@
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+
+#include "qrb_audio_common_lib/core/processing_pipeline.hpp"
+
+namespace qrb
+{
+namespace audio_common_lib
+{
+namespace core
+{
+
+bool ProcessingPipeline::add_processor(std::unique_ptr<IAudioProcessor> processor,
+    const ProcessorConfig & config)
+{
+  if (!processor)
+    return false;
+
+  const std::string name = processor->name();
+  for (const auto & stats : stats_) {
+    if (stats.name == name)
+      return false;  // duplicate name within this pipeline instance
+  }
+
+  ProcessorStats stats;
+  stats.name = name;
+
+  Result configure_result = processor->configure(config);
+  if (!configure_result.ok()) {
+    stats.health = ProcessorHealth::kFailed;
+  }
+
+  processors_.push_back(Entry{ std::move(processor) });
+  stats_.push_back(std::move(stats));
+  return true;
+}
+
+void ProcessingPipeline::process(AudioFrame & frame, const ProcessingContext & context)
+{
+  for (size_t i = 0; i < processors_.size(); ++i) {
+    ProcessorStats & stats = stats_[i];
+
+    if (stats.health == ProcessorHealth::kFailed) {
+      continue;  // never ran; configure() already failed, leave frame untouched
+    }
+
+    if (stats.health == ProcessorHealth::kDegraded) {
+      frame.flags = static_cast<uint32_t>(FrameFlag::kBypassed) | frame.flags;
+      stats.bypassed_count++;
+      continue;
+    }
+
+    ProcessResult result = processors_[i].processor->process(frame, context);
+    switch (result.status) {
+      case ProcessResultStatus::kProcessed:
+        stats.processed_count++;
+        stats.consecutive_failures = 0;
+        break;
+      case ProcessResultStatus::kBypassed:
+        frame.flags = static_cast<uint32_t>(FrameFlag::kBypassed) | frame.flags;
+        stats.bypassed_count++;
+        stats.consecutive_failures = 0;
+        break;
+      case ProcessResultStatus::kFailed:
+        stats.failed_count++;
+        stats.consecutive_failures++;
+        if (stats.consecutive_failures >= ProcessingPipeline::kMaxConsecutiveFailures) {
+          stats.health = ProcessorHealth::kDegraded;
+        }
+        break;
+    }
+  }
+}
+
+void ProcessingPipeline::reset_all()
+{
+  for (size_t i = 0; i < processors_.size(); ++i) {
+    if (stats_[i].health == ProcessorHealth::kFailed)
+      continue;  // configure() never succeeded; nothing to reset
+    processors_[i].processor->reset();
+    stats_[i].health = ProcessorHealth::kHealthy;
+    stats_[i].consecutive_failures = 0;
+  }
+}
+
+}  // namespace core
+}  // namespace audio_common_lib
+}  // namespace qrb
