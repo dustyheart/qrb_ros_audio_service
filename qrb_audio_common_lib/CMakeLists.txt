@@ -16,6 +16,7 @@ add_library(${PROJECT_NAME} SHARED
   src/pulse_stream.cpp
   src/audio_common_wrapper.cpp
   src/core/processing_pipeline.cpp
+  src/core/pipewire_pulse_backend.cpp
 )
 
 target_include_directories(${PROJECT_NAME}
@@ -52,6 +53,16 @@ if(BUILD_TESTING)
   target_include_directories(core_pipeline_test PRIVATE include)
   target_link_libraries(core_pipeline_test ${PROJECT_NAME})
   add_test(NAME core_pipeline_test COMMAND core_pipeline_test)
+
+  add_executable(core_fake_backend_test test/core_fake_backend_test.cpp)
+  target_include_directories(core_fake_backend_test PRIVATE include)
+  target_link_libraries(core_fake_backend_test ${PROJECT_NAME})
+  add_test(NAME core_fake_backend_test COMMAND core_fake_backend_test)
+
+  # Hardware-dependent; not registered with CTest, built for manual use only.
+  add_executable(manual_pipewire_backend_capture test/manual_pipewire_backend_capture.cpp)
+  target_include_directories(manual_pipewire_backend_capture PRIVATE include)
+  target_link_libraries(manual_pipewire_backend_capture ${PROJECT_NAME})
 endif()
 
 install(TARGETS ${PROJECT_NAME}

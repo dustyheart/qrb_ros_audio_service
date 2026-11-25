@@ -1,0 +1,145 @@
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+
+#include "qrb_audio_common_lib/core/pipewire_pulse_backend.hpp"
+
+#include "qrb_audio_common_lib/audio_common_wrapper.hpp"
+
+namespace qrb
+{
+namespace audio_common_lib
+{
+namespace core
+{
+
+namespace
+{
+// AudioStreamInfo::volume must be in (STREAM_VOL_MIN, STREAM_VOL_MAX], see
+// PulseCommonStream::audio_stream_open - a value of 0 makes stream creation
+// fail outright. AudioStreamConfig has no volume concept (capture doesn't
+// need one), so always pass a safe non-zero default here.
+constexpr uint8_t kCaptureVolume = 50;
+}  // namespace
+
+PipeWirePulseBackend::~PipeWirePulseBackend()
+{
+  stop();
+}
+
+Result PipeWirePulseBackend::configure(const AudioStreamConfig & config)
+{
+  if (status_ != AudioBackendStatus::kUnconnected && status_ != AudioBackendStatus::kStopped) {
+    return Result::Error(
+        ErrorCode::kStreamStateConflict, "configure() called while backend is active");
+  }
+  if (config.sample_rate == 0 || config.channels == 0) {
+    return Result::Error(ErrorCode::kInvalidConfig, "sample_rate/channels must be non-zero");
+  }
+
+  // audio_stream_open() dispatches on a process-wide static (g_backend) that
+  // defaults to ALSA until something calls detect_audio_backend(). This class
+  // promises to be the PipeWire-Pulse backend specifically, so it cannot rely
+  // on some other caller (today, AudioManager::get_instance()) having already
+  // run that detection - do it here, unconditionally, and fail loudly if the
+  // detected backend isn't PulseAudio rather than silently falling through to
+  // whatever audio_stream_open() picks.
+  if (detect_audio_backend() != AudioBackend::PULSEAUDIO) {
+    status_ = AudioBackendStatus::kFailed;
+    return Result::Error(
+        ErrorCode::kBackendInitFailed, "PulseAudio/pipewire-pulse backend not available");
+  }
+
+  AudioStreamInfo info;
+  info.type = StreamType::Capture;
+  info.rate = config.sample_rate;
+  info.channels = config.channels;
+  info.format = config.sample_format;
+  info.device = config.device;
+  info.fragment_duration_ms = config.fragment_duration_ms;
+  info.need_timestamp = config.need_timestamp;
+  info.pcm_mode = true;
+  info.volume = kCaptureVolume;
+
+  config_ = config;
+
+  auto event_cb = [this](StreamEvent event, StreamEventData data, void *) {
+    switch (event) {
+      case StreamEvent::StreamData: {
+        if (!callback_ || status_ != AudioBackendStatus::kReady)
+          return;
+        AudioFrame frame;
+        frame.data = data.data_buf;
+        frame.sample_rate = config_.sample_rate;
+        frame.channels = config_.channels;
+        frame.sample_format = config_.sample_format;
+        uint32_t bytes_per_sample = static_cast<uint32_t>(config_.sample_format / 8);
+        uint32_t frame_bytes = config_.channels * bytes_per_sample;
+        frame.frame_count = frame_bytes ? static_cast<uint32_t>(frame.byte_size() / frame_bytes) : 0;
+        frame.sequence = sequence_++;
+        frame.timestamp_usec = data.usec;
+        callback_(frame);
+        return;
+      }
+      case StreamEvent::StreamAbort:
+        status_ = AudioBackendStatus::kFailed;
+        return;
+      case StreamEvent::StreamStoped:
+        if (status_ != AudioBackendStatus::kFailed)
+          status_ = AudioBackendStatus::kStopped;
+        return;
+      default:
+        return;
+    }
+  };
+
+  stream_handle_ = audio_stream_open(info, event_cb);
+  if (stream_handle_ == 0) {
+    status_ = AudioBackendStatus::kFailed;
+    return Result::Error(ErrorCode::kBackendInitFailed, "audio_stream_open failed");
+  }
+
+  status_ = AudioBackendStatus::kStopped;
+  return Result::Ok();
+}
+
+Result PipeWirePulseBackend::start(FrameCallback callback)
+{
+  if (stream_handle_ == 0) {
+    return Result::Error(ErrorCode::kStreamStateConflict, "configure() was not called");
+  }
+  if (status_ == AudioBackendStatus::kReady) {
+    return Result::Error(ErrorCode::kStreamStateConflict, "already started");
+  }
+
+  callback_ = std::move(callback);
+  sequence_ = 0;
+
+  int ret = audio_stream_start(stream_handle_);
+  if (ret != 0) {
+    status_ = AudioBackendStatus::kFailed;
+    return Result::Error(ErrorCode::kBackendInitFailed, "audio_stream_start failed");
+  }
+
+  status_ = AudioBackendStatus::kReady;
+  return Result::Ok();
+}
+
+Result PipeWirePulseBackend::stop()
+{
+  if (stream_handle_ == 0) {
+    return Result::Ok();  // nothing to stop, matches destructor calling stop() unconditionally
+  }
+
+  if (status_ == AudioBackendStatus::kReady) {
+    audio_stream_stop(stream_handle_);
+  }
+  audio_stream_close(stream_handle_);
+  stream_handle_ = 0;
+  callback_ = nullptr;
+  status_ = AudioBackendStatus::kStopped;
+  return Result::Ok();
+}
+
+}  // namespace core
+}  // namespace audio_common_lib
+}  // namespace qrb
