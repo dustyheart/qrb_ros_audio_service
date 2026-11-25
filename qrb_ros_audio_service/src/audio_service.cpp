@@ -264,6 +264,11 @@ void AudioServer::service_callback(const std::shared_ptr<rmw_request_id_t> reque
           } catch (const std::exception & e) {
             RCLCPP_ERROR(this->get_logger(), "%s", e.what());
           }
+        } else {
+          // Used to return success=false with no log line at all.
+          RCLCPP_ERROR(this->get_logger(),
+              "create record stream rejected: [invalid_config] need non-zero "
+              "channels/sample_rate/sample_format and either source or pub_pcm");
         }
       }
       response->stream_handle = stream_handle_by_create;

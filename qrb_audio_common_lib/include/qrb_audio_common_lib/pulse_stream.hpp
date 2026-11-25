@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "pulse/pulseaudio.h"
 #include "qrb_audio_common_lib/audio_log.hpp"
@@ -60,7 +61,7 @@ protected:
   static void pulse_stream_state_callback(pa_stream * stream, void * userdata);
   static void stream_underflow_callback(pa_stream * stream, void * userdata);
   static void stream_overflow_callback(pa_stream * stream, void * userdata);
-  static void check_context_ready();
+  static bool check_context_ready();
 
 public:
   std::shared_ptr<pa_sample_spec> sample_spec;
@@ -74,6 +75,7 @@ public:
   virtual ~PulseCommonStream();
   static uint32_t audio_stream_open(const AudioStreamInfo & stream_info,
       stream_event_callback_func event_callback);
+  static int list_sources(std::vector<std::string> & names);
 
   virtual int start_stream() = 0;
   int pause_stream(bool pause) override;

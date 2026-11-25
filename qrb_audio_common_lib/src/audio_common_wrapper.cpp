@@ -161,5 +161,12 @@ int audio_stream_write(uint32_t stream_handle, const void * buf, size_t length)
   return stream->write_data(buf, length);
 }
 
+int audio_list_capture_devices(std::vector<std::string> & names)
+{
+  if (g_backend == AudioBackend::PULSEAUDIO)
+    return PulseCommonStream::list_sources(names);
+  return -ENOTSUP;
+}
+
 }  // namespace audio_common_lib
 }  // namespace qrb

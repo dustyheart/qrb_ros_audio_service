@@ -59,6 +59,10 @@ if(BUILD_TESTING)
   target_link_libraries(core_fake_backend_test ${PROJECT_NAME})
   add_test(NAME core_fake_backend_test COMMAND core_fake_backend_test)
 
+  add_executable(core_config_validation_test test/core_config_validation_test.cpp)
+  target_include_directories(core_config_validation_test PRIVATE include)
+  add_test(NAME core_config_validation_test COMMAND core_config_validation_test)
+
   # Hardware-dependent; not registered with CTest, built for manual use only.
   add_executable(manual_pipewire_backend_capture test/manual_pipewire_backend_capture.cpp)
   target_include_directories(manual_pipewire_backend_capture PRIVATE include)

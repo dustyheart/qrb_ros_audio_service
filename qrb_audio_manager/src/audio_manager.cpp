@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 #include "qrb_audio_common_lib/audio_common_wrapper.hpp"
+#include "qrb_audio_common_lib/core/config_validation.hpp"
 #include "qrb_audio_common_lib/core/pipewire_pulse_backend.hpp"
 #include "qrb_audio_manager/audio_manager.hpp"
 #include "qrb_audio_manager/stream.hpp"
@@ -73,6 +74,30 @@ static std::mutex g_capture_backends_mutex;
 static std::unordered_map<uint32_t, std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend>>
     g_capture_backends;
 
+// Why the last OPEN failed, for create_record_stream()'s exception text.
+// Stream::open() -> domain callback only carries a bool back, and the
+// callback runs synchronously on the calling (ROS service) thread, so a
+// thread_local is enough to get the core::Result across without changing the
+// Stream/domain-callback interface. Service callbacks run in a reentrant
+// group, so this must not be a plain static.
+static thread_local qrb::audio_common_lib::core::Result g_last_open_error;
+
+static qrb::audio_common_lib::core::AudioStreamConfig make_capture_config(
+    const StreamConfigs * configs)
+{
+  const auto & backend_defaults = AudioManager::get_backend_defaults();
+  qrb::audio_common_lib::core::AudioStreamConfig config;
+  config.device = backend_defaults.capture_device;
+  config.sample_rate = configs->sample_rate;
+  config.channels = configs->channels;
+  config.sample_format = configs->sample_format;
+  config.fragment_duration_ms = backend_defaults.capture_fragment_duration_ms;
+  config.frame_duration_ms = backend_defaults.capture_fragment_duration_ms
+                                 ? backend_defaults.capture_fragment_duration_ms
+                                 : 20;
+  return config;
+}
+
 static uint32_t register_capture_backend(
     std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend> backend)
 {
@@ -100,22 +125,15 @@ static bool audio_common_stream_cb(const void * const payload,
   bool use_new_capture_backend =
       configs->type == StreamType::RECORD && configs->source.empty();
 
-  if (cmd == StreamCommand::OPEN && use_new_capture_backend) {
-    const auto & backend_defaults = AudioManager::get_backend_defaults();
-    core::AudioStreamConfig config;
-    config.device = backend_defaults.capture_device;
-    config.sample_rate = configs->sample_rate;
-    config.channels = configs->channels;
-    config.sample_format = configs->sample_format;
-    config.fragment_duration_ms = backend_defaults.capture_fragment_duration_ms;
-    config.frame_duration_ms = backend_defaults.capture_fragment_duration_ms
-                                   ? backend_defaults.capture_fragment_duration_ms
-                                   : 20;
+  if (cmd == StreamCommand::OPEN)
+    g_last_open_error = core::Result::Ok();
 
+  if (cmd == StreamCommand::OPEN && use_new_capture_backend) {
     auto backend = std::make_unique<core::PipeWirePulseBackend>();
-    core::Result result = backend->configure(config);
+    core::Result result = backend->configure(make_capture_config(configs));
     if (!result.ok()) {
-      AM_LOGE(LOG_TAG, "capture backend configure failed: " << result.message);
+      AM_LOGE(LOG_TAG, "capture backend configure failed: " << result.to_log_string());
+      g_last_open_error = result;
       return false;
     }
 
@@ -179,6 +197,18 @@ static bool audio_common_stream_cb(const void * const payload,
       } else {
         // RECORD with a non-empty source (record-to-file): legacy path only,
         // use_new_capture_backend above is false whenever source is set.
+        // Apply the same format/device validation as the streaming path:
+        // without it this path had the same two silent failures (unknown
+        // sample_format recorded as S16, unknown device recorded nothing).
+        core::AudioStreamConfig check = make_capture_config(configs);
+        core::Result result = core::validate_capture_config(check);
+        if (result.ok())
+          result = core::PipeWirePulseBackend::check_capture_device(check.device);
+        if (!result.ok()) {
+          AM_LOGE(LOG_TAG, "record-to-file config rejected: " << result.to_log_string());
+          g_last_open_error = result;
+          return false;
+        }
         info.type = qrb::audio_common_lib::StreamType::Capture;
         info.file_path = configs->source;
         info.device = backend_defaults.capture_device;
@@ -339,7 +369,12 @@ uint32_t AudioManager::create_record_stream(uint32_t sample_rate,
 
   if (!stream_ptr->open()) {
     stream_ptr = nullptr;
-    throw std::runtime_error("create record stream failed");
+    using qrb::audio_common_lib::core::ErrorCode;
+    using qrb::audio_common_lib::core::Result;
+    Result reason = g_last_open_error.ok()
+                        ? Result::Error(ErrorCode::kBackendInitFailed, "audio_stream_open failed")
+                        : g_last_open_error;
+    throw std::runtime_error("create record stream failed: " + reason.to_log_string());
   }
 
   streams_[stream_handle] = stream_ptr;

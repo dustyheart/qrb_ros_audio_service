@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 #include "qrb_audio_common_lib/core/audio_capture_backend.hpp"
 
@@ -38,6 +39,14 @@ public:
   Result start(FrameCallback callback) override;
   Result stop() override;
   AudioBackendStatus status() const override { return status_; }
+
+  // kOk if `device` is empty (= server default) or names an existing capture
+  // source; kDeviceUnavailable (message lists the available sources) if not;
+  // kBackendInitFailed if the server couldn't be queried. kOk without
+  // checking if the process-wide backend is ALSA (it can't enumerate, and
+  // rejects bad names itself at open time) - lets AudioManager's legacy
+  // record-to-file path share this check regardless of backend.
+  static Result check_capture_device(const std::string & device);
 
 private:
   AudioStreamConfig config_;

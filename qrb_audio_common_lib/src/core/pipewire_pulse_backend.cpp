@@ -3,7 +3,13 @@
 
 #include "qrb_audio_common_lib/core/pipewire_pulse_backend.hpp"
 
+#include <algorithm>
+#include <cerrno>
+#include <string>
+#include <vector>
+
 #include "qrb_audio_common_lib/audio_common_wrapper.hpp"
+#include "qrb_audio_common_lib/core/config_validation.hpp"
 
 namespace qrb
 {
@@ -21,6 +27,36 @@ namespace
 constexpr uint8_t kCaptureVolume = 50;
 }  // namespace
 
+Result PipeWirePulseBackend::check_capture_device(const std::string & device)
+{
+  if (device.empty())
+    return Result::Ok();
+
+  std::vector<std::string> sources;
+  int ret = audio_list_capture_devices(sources);
+  if (ret == -ENOTSUP) {
+    // Active backend can't enumerate (ALSA); it validates the device name
+    // itself at open time, so there is nothing to pre-check here.
+    return Result::Ok();
+  }
+  if (ret != 0) {
+    return Result::Error(ErrorCode::kBackendInitFailed,
+        "cannot enumerate capture devices (error " + std::to_string(ret) + ")");
+  }
+  if (std::find(sources.begin(), sources.end(), device) != sources.end())
+    return Result::Ok();
+
+  std::string available;
+  for (const auto & name : sources) {
+    if (!available.empty())
+      available += ", ";
+    available += name;
+  }
+  return Result::Error(ErrorCode::kDeviceUnavailable,
+      "capture device '" + device + "' not found; available: " +
+          (available.empty() ? "<none>" : available));
+}
+
 PipeWirePulseBackend::~PipeWirePulseBackend()
 {
   stop();
@@ -32,9 +68,9 @@ Result PipeWirePulseBackend::configure(const AudioStreamConfig & config)
     return Result::Error(
         ErrorCode::kStreamStateConflict, "configure() called while backend is active");
   }
-  if (config.sample_rate == 0 || config.channels == 0) {
-    return Result::Error(ErrorCode::kInvalidConfig, "sample_rate/channels must be non-zero");
-  }
+  Result valid = validate_capture_config(config);
+  if (!valid.ok())
+    return valid;
 
   // audio_stream_open() dispatches on a process-wide static (g_backend) that
   // defaults to ALSA until something calls detect_audio_backend(). This class
@@ -47,6 +83,12 @@ Result PipeWirePulseBackend::configure(const AudioStreamConfig & config)
     status_ = AudioBackendStatus::kFailed;
     return Result::Error(
         ErrorCode::kBackendInitFailed, "PulseAudio/pipewire-pulse backend not available");
+  }
+
+  Result device_ok = check_capture_device(config.device);
+  if (!device_ok.ok()) {
+    status_ = AudioBackendStatus::kFailed;
+    return device_ok;
   }
 
   AudioStreamInfo info;

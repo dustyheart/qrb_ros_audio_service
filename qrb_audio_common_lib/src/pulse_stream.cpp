@@ -268,13 +268,83 @@ void PulseCommonStream::clean_pulse_mainloop()
   };
 }
 
-void PulseCommonStream::check_context_ready()
+// Bounded wait. This used to spin forever, so a pipewire-pulse that never
+// finished the handshake (or failed it: PA_CONTEXT_FAILED) hung whichever ROS
+// service call happened to open the first stream, with no error ever
+// returned. Observed on real hardware while pipewire-pulse was being
+// restarted under the caller (create stuck at "pulse_context_state_ = 1").
+bool PulseCommonStream::check_context_ready()
 {
-  for (;;) {
-    if (pulse_context_state_ == PA_CONTEXT_READY)
-      break;
-    usleep(5000);
+  constexpr int kTimeoutMs = 5000;
+  constexpr int kPollUs = 5000;
+  for (int waited_us = 0; waited_us < kTimeoutMs * 1000; waited_us += kPollUs) {
+    pa_context_state_t state = pulse_context_state_;
+    if (state == PA_CONTEXT_READY)
+      return true;
+    if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED) {
+      LOGE("pulse context failed (state %d)", state);
+      return false;
+    }
+    usleep(kPollUs);
   }
+  LOGE("pulse context not ready after %d ms (state %d)", kTimeoutMs, pulse_context_state_);
+  return false;
+}
+
+namespace
+{
+struct SourceListQuery
+{
+  pa_threaded_mainloop * mainloop;
+  std::vector<std::string> * names;
+  bool done = false;
+  bool failed = false;
+};
+
+void source_info_list_callback(pa_context *, const pa_source_info * info, int eol, void * userdata)
+{
+  auto * query = static_cast<SourceListQuery *>(userdata);
+  if (eol < 0) {
+    query->failed = true;
+    query->done = true;
+  } else if (eol > 0) {
+    query->done = true;
+  } else if (info && info->name) {
+    query->names->emplace_back(info->name);
+  }
+  pa_threaded_mainloop_signal(query->mainloop, 0);
+}
+}  // namespace
+
+int PulseCommonStream::list_sources(std::vector<std::string> & names)
+{
+  names.clear();
+  if (pulse_context_ == nullptr) {
+    if (init_pulse_env() == nullptr)
+      return -EIO;
+  }
+  if (!check_context_ready())
+    return -EIO;
+
+  SourceListQuery query{ pulse_mainloop_, &names };
+
+  pa_threaded_mainloop_lock(pulse_mainloop_);
+  pa_operation * op = pa_context_get_source_info_list(pulse_context_, source_info_list_callback, &query);
+  if (op == nullptr) {
+    LOGE("pa_context_get_source_info_list failed: %s", pa_strerror(pa_context_errno(pulse_context_)));
+    pa_threaded_mainloop_unlock(pulse_mainloop_);
+    return -EIO;
+  }
+  while (!query.done && pa_operation_get_state(op) == PA_OPERATION_RUNNING)
+    pa_threaded_mainloop_wait(pulse_mainloop_);
+  pa_operation_unref(op);
+  pa_threaded_mainloop_unlock(pulse_mainloop_);
+
+  if (query.failed || !query.done) {
+    LOGE("source enumeration failed");
+    return -EIO;
+  }
+  return 0;
 }
 
 PulseCommonStream::PulseCommonStream(string filepath,
@@ -284,7 +354,8 @@ PulseCommonStream::PulseCommonStream(string filepath,
 {
   if (PulseCommonStream::pulse_context_ == nullptr) {
     PulseCommonStream::init_pulse_env();
-    PulseCommonStream::check_context_ready();
+    if (!PulseCommonStream::check_context_ready())
+      throw std::runtime_error("pulse context not ready");
   }
 }
 
@@ -778,10 +849,20 @@ int CaptureStream::start_stream()
     return -EIO;
   }
 
+  // Must also stop on FAILED/TERMINATED: waiting for READY alone never
+  // returns if the server rejects the stream (pulse_stream_state_callback
+  // still signals the mainloop on those transitions).
   pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
-  while (get_stream_state() != PA_STREAM_READY)
+  while (get_stream_state() != PA_STREAM_READY && get_stream_state() != PA_STREAM_FAILED &&
+         get_stream_state() != PA_STREAM_TERMINATED)
     pa_threaded_mainloop_wait(PulseCommonStream::pulse_mainloop_);
   pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
+
+  if (get_stream_state() != PA_STREAM_READY) {
+    LOGE("capture stream failed to connect (state %d): %s", get_stream_state(),
+        pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
+    return -EIO;
+  }
 
   uint32_t stream_index = pa_stream_get_index(stream);
   pa_context_set_source_output_volume(

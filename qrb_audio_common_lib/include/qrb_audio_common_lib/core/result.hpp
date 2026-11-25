@@ -67,6 +67,11 @@ struct Result
 
   bool ok() const { return code == ErrorCode::kOk; }
 
+  // "[device_unavailable] capture device 'x' not found ..." - the single format
+  // used for logs and (until AudioRequest grows an error field, stage 3) for
+  // the exception text that reaches the ROS layer.
+  std::string to_log_string() const { return std::string("[") + to_string(code) + "] " + message; }
+
   static Result Ok() { return Result{ ErrorCode::kOk, "" }; }
   static Result Error(ErrorCode c, std::string msg) { return Result{ c, std::move(msg) }; }
 };

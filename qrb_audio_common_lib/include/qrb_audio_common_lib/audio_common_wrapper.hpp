@@ -75,6 +75,17 @@ int audio_stream_stop(uint32_t stream_handle);
 int audio_stream_close(uint32_t stream_handle);
 int audio_stream_write(uint32_t stream_handle, const void * buf, size_t length);
 
+// Enumerate capture sources (PulseAudio/pipewire-pulse source names, including
+// ".monitor" sources) as accepted by AudioStreamInfo::device. Returns 0 on
+// success, -ENOTSUP when the active backend can't enumerate (ALSA), -EIO when
+// the audio server can't be queried.
+//
+// Needed because pipewire-pulse does NOT reject an unknown source name in
+// pa_stream_connect_record(): the stream still reaches PA_STREAM_READY, it is
+// simply never linked to a device, so capture "succeeds" and delivers no data
+// (verified on real hardware). Existence has to be checked up front.
+int audio_list_capture_devices(std::vector<std::string> & names);
+
 }  // namespace audio_common_lib
 }  // namespace qrb
 
