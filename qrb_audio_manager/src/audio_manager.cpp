@@ -7,11 +7,15 @@
 #include <dirent.h>
 #include <sys/types.h>
 
+#include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #include "qrb_audio_common_lib/audio_common_wrapper.hpp"
+#include "qrb_audio_common_lib/core/pipewire_pulse_backend.hpp"
 #include "qrb_audio_manager/audio_manager.hpp"
 #include "qrb_audio_manager/stream.hpp"
 // clang-format on
@@ -48,6 +52,43 @@ AudioBackendDefaults AudioManager::backend_defaults_{};
 
 static stream_data_cb_t g_stream_data_cb = nullptr;
 
+// Record/capture streams that stream PCM (pub_pcm / a topic subscriber, i.e.
+// no destination file) are routed through core::IAudioCaptureBackend
+// (PipeWirePulseBackend in production) instead of the legacy
+// audio_stream_open/start/stop/close C API. Record-to-file (configs->source
+// non-empty, using libsndfile inside CaptureStream) and all of playback keep
+// using the legacy API unchanged - AudioStreamConfig/IAudioCaptureBackend
+// has no concept of a destination file, and silently dropping that
+// capability would be a real behavior regression (source is a real,
+// documented AudioRequest field; see audio_service.cpp's "either source or
+// topic_name" check), not just an unlikely corner case.
+//
+// START/STOP/CLOSE/MUTE dispatch on registry membership of ac_handle, not on
+// configs->type, so a mixed-mode record stream (source set -> legacy path)
+// is routed correctly even though configs->type is RECORD for it too; the
+// two handle spaces are independently randomly generated (same scheme
+// AudioManager::generate_key() already uses for am_handle), so collision risk
+// is the same order as the rest of this codebase already accepts.
+static std::mutex g_capture_backends_mutex;
+static std::unordered_map<uint32_t, std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend>>
+    g_capture_backends;
+
+static uint32_t register_capture_backend(
+    std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend> backend)
+{
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<uint32_t> dist(1, UINT32_MAX);
+
+  std::lock_guard<std::mutex> lock(g_capture_backends_mutex);
+  uint32_t handle = dist(gen);
+  while (handle == 0 || g_capture_backends.find(handle) != g_capture_backends.end()) {
+    handle = dist(gen);
+  }
+  g_capture_backends[handle] = std::move(backend);
+  return handle;
+}
+
 static bool audio_common_stream_cb(const void * const payload,
     StreamCommand cmd,
     uint32_t & ac_handle)
@@ -55,6 +96,68 @@ static bool audio_common_stream_cb(const void * const payload,
   using namespace qrb::audio_common_lib;
   const StreamConfigs * configs = static_cast<const StreamConfigs *>(payload);
   uint32_t am_handle = configs->stream_handle;
+
+  bool use_new_capture_backend =
+      configs->type == StreamType::RECORD && configs->source.empty();
+
+  if (cmd == StreamCommand::OPEN && use_new_capture_backend) {
+    const auto & backend_defaults = AudioManager::get_backend_defaults();
+    core::AudioStreamConfig config;
+    config.device = backend_defaults.capture_device;
+    config.sample_rate = configs->sample_rate;
+    config.channels = configs->channels;
+    config.sample_format = configs->sample_format;
+    config.fragment_duration_ms = backend_defaults.capture_fragment_duration_ms;
+    config.frame_duration_ms = backend_defaults.capture_fragment_duration_ms
+                                   ? backend_defaults.capture_fragment_duration_ms
+                                   : 20;
+
+    auto backend = std::make_unique<core::PipeWirePulseBackend>();
+    core::Result result = backend->configure(config);
+    if (!result.ok()) {
+      AM_LOGE(LOG_TAG, "capture backend configure failed: " << result.message);
+      return false;
+    }
+
+    ac_handle = register_capture_backend(std::move(backend));
+    return true;
+  }
+
+  if (cmd != StreamCommand::OPEN) {
+    // Dispatch on registry membership, not configs->type: a record-to-file
+    // stream (source non-empty) is StreamType::RECORD too but lives in the
+    // legacy handle space, so it must fall through to the switch below.
+    std::unique_lock<std::mutex> lock(g_capture_backends_mutex);
+    auto it = g_capture_backends.find(ac_handle);
+    if (it != g_capture_backends.end()) {
+      switch (cmd) {
+        case StreamCommand::START: {
+          auto & backend = it->second;
+          lock.unlock();  // start()'s callback may itself want the lock via a later STOP/CLOSE
+          core::Result result = backend->start([am_handle](const core::AudioFrame & frame) {
+            if (g_stream_data_cb)
+              g_stream_data_cb(am_handle, frame.data, frame.timestamp_usec);
+          });
+          if (!result.ok())
+            AM_LOGE(LOG_TAG, "capture backend start failed: " << result.message);
+          return result.ok();
+        }
+        case StreamCommand::STOP:
+          return it->second->stop().ok();
+        case StreamCommand::CLOSE:
+          it->second->stop();
+          g_capture_backends.erase(it);
+          return true;
+        case StreamCommand::MUTE:
+          // Capture never supported mute through the legacy API either
+          // (audio_stream_mute() only acts on a PulseAudio sink-input, i.e.
+          // playback); keep that behavior.
+          return false;
+        default:
+          return false;
+      }
+    }
+  }
 
   switch (cmd) {
     case StreamCommand::OPEN: {
@@ -74,6 +177,8 @@ static bool audio_common_stream_cb(const void * const payload,
         if (!configs->subs_name.empty())
           info.pcm_mode = true;
       } else {
+        // RECORD with a non-empty source (record-to-file): legacy path only,
+        // use_new_capture_backend above is false whenever source is set.
         info.type = qrb::audio_common_lib::StreamType::Capture;
         info.file_path = configs->source;
         info.device = backend_defaults.capture_device;
