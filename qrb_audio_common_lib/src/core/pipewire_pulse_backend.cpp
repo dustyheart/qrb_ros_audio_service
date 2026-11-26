@@ -4,8 +4,8 @@
 #include "qrb_audio_common_lib/core/pipewire_pulse_backend.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cerrno>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -55,8 +55,8 @@ Result PipeWirePulseBackend::check_capture_device(const std::string & device)
     available += name;
   }
   return Result::Error(ErrorCode::kDeviceUnavailable,
-      "capture device '" + device + "' not found; available: " +
-          (available.empty() ? "<none>" : available));
+      "capture device '" + device +
+          "' not found; available: " + (available.empty() ? "<none>" : available));
 }
 
 PipeWirePulseBackend::~PipeWirePulseBackend()
@@ -121,11 +121,13 @@ Result PipeWirePulseBackend::configure(const AudioStreamConfig & config)
         frame.sample_format = config_.sample_format;
         uint32_t bytes_per_sample = static_cast<uint32_t>(config_.sample_format / 8);
         uint32_t frame_bytes = config_.channels * bytes_per_sample;
-        frame.frame_count = frame_bytes ? static_cast<uint32_t>(frame.byte_size() / frame_bytes) : 0;
+        frame.frame_count =
+            frame_bytes ? static_cast<uint32_t>(frame.byte_size() / frame_bytes) : 0;
         frame.sequence = sequence_++;
         frame.read_duration_usec = data.usec;  // a duration; see AudioFrame
         if (timestamper_) {
-          auto ts = timestamper_->on_chunk(frame.frame_count, data.arrival_mono_usec, data.latency_usec);
+          auto ts =
+              timestamper_->on_chunk(frame.frame_count, data.arrival_mono_usec, data.latency_usec);
           frame.timestamp_usec = ts.timestamp_usec;
           if (ts_debug_) {
             LOGI("tsdbg seq=%llu frames=%u arrival=%llu latency=%lld ts=%llu resync=%d",
@@ -176,9 +178,8 @@ Result PipeWirePulseBackend::start(FrameCallback callback)
   // Set before audio_stream_start(): the data callback may fire as soon as
   // the stream connects.
   ts_debug_ = getenv("QRB_AUDIO_TS_DEBUG") != nullptr;  // per-chunk diagnostics, off by default
-  timestamper_ = config_.need_timestamp
-                     ? std::make_unique<CaptureTimestamper>(config_.sample_rate)
-                     : nullptr;
+  timestamper_ =
+      config_.need_timestamp ? std::make_unique<CaptureTimestamper>(config_.sample_rate) : nullptr;
 
   int ret = audio_stream_start(stream_handle_);
   if (ret != 0) {
@@ -200,8 +201,9 @@ Result PipeWirePulseBackend::stop()
     audio_stream_stop(stream_handle_);
   }
   if (timestamper_) {
-    LOGI("capture timestamps: %llu discontinuity resync(s); measured audio clock / "
-         "CLOCK_MONOTONIC ratio %.5f",
+    LOGI(
+        "capture timestamps: %llu discontinuity resync(s); measured audio clock / "
+        "CLOCK_MONOTONIC ratio %.5f",
         static_cast<unsigned long long>(timestamper_->resync_count()),
         timestamper_->clock_ratio() > 0 ? 1.0 / timestamper_->clock_ratio() : 0.0);
   }

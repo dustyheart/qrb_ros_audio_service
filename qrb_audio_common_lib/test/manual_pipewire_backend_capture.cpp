@@ -33,16 +33,17 @@ int main(int argc, char ** argv)
 
   PipeWirePulseBackend backend;
   Result configure_result = backend.configure(config);
-  printf("[manual] configure() ok=%d msg=%s\n", configure_result.ok(), configure_result.message.c_str());
+  printf("[manual] configure() ok=%d msg=%s\n", configure_result.ok(),
+      configure_result.message.c_str());
   if (!configure_result.ok())
     return 1;
 
   ProcessingPipeline pipeline;
   pipeline.add_processor(std::make_unique<PassthroughProcessor>(), {});
-  ProcessingContext ctx{ config.sample_rate, config.channels, config.frame_duration_ms };
+  ProcessingContext ctx{config.sample_rate, config.channels, config.frame_duration_ms};
 
-  std::atomic<int> frame_count{ 0 };
-  std::atomic<size_t> last_bytes{ 0 };
+  std::atomic<int> frame_count{0};
+  std::atomic<size_t> last_bytes{0};
 
   Result start_result = backend.start([&](const AudioFrame & const_frame) {
     AudioFrame frame = const_frame;

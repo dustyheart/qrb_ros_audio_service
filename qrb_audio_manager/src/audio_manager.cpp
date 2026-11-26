@@ -71,7 +71,8 @@ static stream_data_cb_t g_stream_data_cb = nullptr;
 // AudioManager::generate_key() already uses for am_handle), so collision risk
 // is the same order as the rest of this codebase already accepts.
 static std::mutex g_capture_backends_mutex;
-static std::unordered_map<uint32_t, std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend>>
+static std::unordered_map<uint32_t,
+    std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend>>
     g_capture_backends;
 
 // Why the last OPEN failed, for create_record_stream()'s exception text.
@@ -92,9 +93,9 @@ static qrb::audio_common_lib::core::AudioStreamConfig make_capture_config(
   config.channels = configs->channels;
   config.sample_format = configs->sample_format;
   config.fragment_duration_ms = backend_defaults.capture_fragment_duration_ms;
-  config.frame_duration_ms = backend_defaults.capture_fragment_duration_ms
-                                 ? backend_defaults.capture_fragment_duration_ms
-                                 : 20;
+  config.frame_duration_ms = backend_defaults.capture_fragment_duration_ms ?
+                                 backend_defaults.capture_fragment_duration_ms :
+                                 20;
   config.need_timestamp = configs->need_timestamp;
   return config;
 }
@@ -123,8 +124,7 @@ static bool audio_common_stream_cb(const void * const payload,
   const StreamConfigs * configs = static_cast<const StreamConfigs *>(payload);
   uint32_t am_handle = configs->stream_handle;
 
-  bool use_new_capture_backend =
-      configs->type == StreamType::RECORD && configs->source.empty();
+  bool use_new_capture_backend = configs->type == StreamType::RECORD && configs->source.empty();
 
   if (cmd == StreamCommand::OPEN)
     g_last_open_error = core::Result::Ok();
@@ -219,8 +219,9 @@ static bool audio_common_stream_cb(const void * const payload,
         // callers keep working, but say so instead of silently publishing
         // zero stamps.
         if (configs->need_timestamp)
-          AM_LOGI(LOG_TAG, "need_timestamp is not supported for record-to-file streams "
-                           "(source set); published AudioData.timestamp will be zero");
+          AM_LOGI(LOG_TAG,
+              "need_timestamp is not supported for record-to-file streams "
+              "(source set); published AudioData.timestamp will be zero");
         info.type = qrb::audio_common_lib::StreamType::Capture;
         info.file_path = configs->source;
         info.device = backend_defaults.capture_device;
@@ -296,12 +297,11 @@ void AudioManager::set_stream_data_callback(stream_data_cb_t cb)
 void AudioManager::set_backend_defaults(const AudioBackendDefaults & defaults)
 {
   backend_defaults_ = defaults;
-  AM_LOGI(LOG_TAG, "backend defaults updated: capture_device='"
-                       << defaults.capture_device << "', playback_device='"
-                       << defaults.playback_device << "', capture_fragment_duration_ms="
-                       << defaults.capture_fragment_duration_ms
-                       << ", playback_buffer_duration_ms="
-                       << defaults.playback_buffer_duration_ms);
+  AM_LOGI(
+      LOG_TAG, "backend defaults updated: capture_device='"
+                   << defaults.capture_device << "', playback_device='" << defaults.playback_device
+                   << "', capture_fragment_duration_ms=" << defaults.capture_fragment_duration_ms
+                   << ", playback_buffer_duration_ms=" << defaults.playback_buffer_duration_ms);
 }
 
 const AudioBackendDefaults & AudioManager::get_backend_defaults()
@@ -386,9 +386,9 @@ uint32_t AudioManager::create_record_stream(uint32_t sample_rate,
     stream_ptr = nullptr;
     using qrb::audio_common_lib::core::ErrorCode;
     using qrb::audio_common_lib::core::Result;
-    Result reason = g_last_open_error.ok()
-                        ? Result::Error(ErrorCode::kBackendInitFailed, "audio_stream_open failed")
-                        : g_last_open_error;
+    Result reason = g_last_open_error.ok() ?
+                        Result::Error(ErrorCode::kBackendInitFailed, "audio_stream_open failed") :
+                        g_last_open_error;
     throw std::runtime_error("create record stream failed: " + reason.to_log_string());
   }
 

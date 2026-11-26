@@ -15,12 +15,12 @@ using namespace qrb::audio_common_lib::core;
 
 static int g_failures = 0;
 
-#define CHECK(cond)                                                                \
-  do {                                                                             \
-    if (!(cond)) {                                                                 \
-      std::fprintf(stderr, "%s:%d CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
-      ++g_failures;                                                                \
-    }                                                                              \
+#define CHECK(cond)                                                                                \
+  do {                                                                                             \
+    if (!(cond)) {                                                                                 \
+      std::fprintf(stderr, "%s:%d CHECK failed: %s\n", __FILE__, __LINE__, #cond);                 \
+      ++g_failures;                                                                                \
+    }                                                                                              \
   } while (0)
 
 // Ideal input (no jitter, stable 85 ms latency, audio clock == monotonic):
@@ -60,12 +60,13 @@ static void test_drift_and_jitter_are_absorbed()
     double true_capture = base + i * 80000.0 / ratio;  // first sample, monotonic us
     double arrival = true_capture + 160000.0 - ((i % 8) == 7 ? 40000.0 : 0.0);
     double reported_latency = 160000.0 + ((i % 8) - 3.5) * 5000.0;  // sawtooth
-    auto out = t.on_chunk(1280, static_cast<uint64_t>(arrival), static_cast<int64_t>(reported_latency));
+    auto out =
+        t.on_chunk(1280, static_cast<uint64_t>(arrival), static_cast<int64_t>(reported_latency));
     CHECK(out.timestamp_usec != 0);
     CHECK(!out.resynced);
     if (i > 0) {
       CHECK(out.timestamp_usec >= prev);  // non-decreasing, always
-      if (i >= 150) {  // window full (8 s ~ 100 chunks) and settled
+      if (i >= 150) {                     // window full (8 s ~ 100 chunks) and settled
         double step = static_cast<double>(out.timestamp_usec - prev);
         min_step = step < min_step ? step : min_step;
         max_step = step > max_step ? step : max_step;
@@ -77,9 +78,11 @@ static void test_drift_and_jitter_are_absorbed()
     prev = out.timestamp_usec;
   }
   const double expected_step = 80000.0 / ratio;  // ~78508 us (window 2 s, slew 2 %)
-  std::printf("drift test: step min/max %.1f/%.1f us (expected %.1f), max |err| %.1f us, ratio %.5f\n",
+  std::printf(
+      "drift test: step min/max %.1f/%.1f us (expected %.1f), max |err| %.1f us, ratio %.5f\n",
       min_step, max_step, expected_step, max_err_late, t.clock_ratio());
-  CHECK(min_step >= expected_step * 0.94 && max_step <= expected_step * 1.06);  // +-5 % slew + wobble
+  CHECK(
+      min_step >= expected_step * 0.94 && max_step <= expected_step * 1.06);  // +-5 % slew + wobble
   CHECK(max_err_late < 10000);  // within 10 ms of the true capture time
   CHECK(t.clock_ratio() > 0.975 && t.clock_ratio() < 0.987);  // measured ~1/1.019
   CHECK(t.resync_count() == 0);
@@ -179,8 +182,8 @@ static void test_startup_rate_transient()
     prev = o.timestamp_usec;
     true_capture += 80000.0 / ratio;
   }
-  std::printf("transient test: max |err| during/after transient %.1f / %.1f us\n", max_err_transient,
-      max_err_settled);
+  std::printf("transient test: max |err| during/after transient %.1f / %.1f us\n",
+      max_err_transient, max_err_settled);
   CHECK(max_err_transient < 40000);
   CHECK(max_err_settled < 10000);
 }
@@ -204,7 +207,8 @@ static void test_map_and_split()
   CHECK(map_monotonic_to_clock_ns(999000000ull, base_mono, base_ros, &out));  // -1 s
   CHECK(out == base_ros - 1000000000LL);
   CHECK(!map_monotonic_to_clock_ns(0, base_mono, base_ros, &out));  // invalid sentinel
-  CHECK(!map_monotonic_to_clock_ns(std::numeric_limits<uint64_t>::max(), base_mono, base_ros, &out));
+  CHECK(
+      !map_monotonic_to_clock_ns(std::numeric_limits<uint64_t>::max(), base_mono, base_ros, &out));
   CHECK(!map_monotonic_to_clock_ns(2000000ull, 0, std::numeric_limits<int64_t>::max(), &out));
 
   int32_t sec = -1;
@@ -213,8 +217,8 @@ static void test_map_and_split()
   CHECK(sec == 1700000000 && nsec == 123456789u);
   CHECK(split_time_ns(0, &sec, &nsec) && sec == 0 && nsec == 0);
   CHECK(!split_time_ns(-1, &sec, &nsec));
-  CHECK(!split_time_ns((static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1) * 1000000000LL,
-      &sec, &nsec));
+  CHECK(!split_time_ns(
+      (static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1) * 1000000000LL, &sec, &nsec));
 }
 
 static void test_monotonic_now()

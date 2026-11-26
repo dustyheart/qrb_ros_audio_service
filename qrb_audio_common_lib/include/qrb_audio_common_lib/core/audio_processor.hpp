@@ -27,9 +27,9 @@ using ProcessorConfig = std::map<std::string, std::string>;
 
 enum class ProcessResultStatus
 {
-  kProcessed,   // frame was modified in place
-  kBypassed,    // processor chose not to touch this frame (disabled/degraded)
-  kFailed,      // processing failed; frame is unchanged, caller decides bypass/stop
+  kProcessed,  // frame was modified in place
+  kBypassed,   // processor chose not to touch this frame (disabled/degraded)
+  kFailed,     // processing failed; frame is unchanged, caller decides bypass/stop
 };
 
 struct ProcessResult

@@ -36,7 +36,7 @@ int main()
   assert(pipeline.add_processor(std::make_unique<PassthroughProcessor>(), {}));
 
   int frames_received = 0;
-  ProcessingContext ctx{ config.sample_rate, config.channels, config.frame_duration_ms };
+  ProcessingContext ctx{config.sample_rate, config.channels, config.frame_duration_ms};
 
   Result start_result = backend.start([&](const AudioFrame & const_frame) {
     AudioFrame frame = const_frame;  // backend callback hands a const ref; pipeline mutates
@@ -44,7 +44,7 @@ int main()
     frames_received++;
     assert(frame.sequence == static_cast<uint64_t>(frames_received - 1));
     assert(frame.byte_size() == config.sample_rate * config.frame_duration_ms / 1000 *
-                                     config.channels * (config.sample_format / 8));
+                                    config.channels * (config.sample_format / 8));
   });
   assert(start_result.ok());
   assert(backend.status() == AudioBackendStatus::kReady);

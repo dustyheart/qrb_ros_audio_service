@@ -72,8 +72,8 @@ struct Result
   // the exception text that reaches the ROS layer.
   std::string to_log_string() const { return std::string("[") + to_string(code) + "] " + message; }
 
-  static Result Ok() { return Result{ ErrorCode::kOk, "" }; }
-  static Result Error(ErrorCode c, std::string msg) { return Result{ c, std::move(msg) }; }
+  static Result Ok() { return Result{ErrorCode::kOk, ""}; }
+  static Result Error(ErrorCode c, std::string msg) { return Result{c, std::move(msg)}; }
 };
 
 }  // namespace core

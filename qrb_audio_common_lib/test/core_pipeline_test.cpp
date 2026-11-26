@@ -41,7 +41,7 @@ void test_passthrough_marks_bypassed()
   assert(pipeline.processor_count() == 1);
 
   AudioFrame frame = make_frame(0);
-  ProcessingContext ctx{ 16000, 1, 20 };
+  ProcessingContext ctx{16000, 1, 20};
   pipeline.process(frame, ctx);
 
   assert(has_flag(frame.flags, FrameFlag::kBypassed));
@@ -64,7 +64,7 @@ void test_degrades_after_consecutive_failures()
   ProcessingPipeline pipeline;
   assert(pipeline.add_processor(std::make_unique<AlwaysFailProcessor>(), {}));
 
-  ProcessingContext ctx{ 16000, 1, 20 };
+  ProcessingContext ctx{16000, 1, 20};
   for (uint64_t i = 0; i < ProcessingPipeline::kMaxConsecutiveFailures - 1; ++i) {
     AudioFrame frame = make_frame(i);
     pipeline.process(frame, ctx);
@@ -99,7 +99,7 @@ void test_failed_configure_skips_processor_forever()
     ProcessResult process(AudioFrame &, const ProcessingContext &) override
     {
       called_ = true;
-      return ProcessResult{ ProcessResultStatus::kProcessed, Result::Ok() };
+      return ProcessResult{ProcessResultStatus::kProcessed, Result::Ok()};
     }
     void reset() override {}
     bool called_ = false;
@@ -111,7 +111,7 @@ void test_failed_configure_skips_processor_forever()
   assert(pipeline.add_processor(std::move(owned), {}));
   assert(pipeline.stats()[0].health == ProcessorHealth::kFailed);
 
-  ProcessingContext ctx{ 16000, 1, 20 };
+  ProcessingContext ctx{16000, 1, 20};
   AudioFrame frame = make_frame(0);
   pipeline.process(frame, ctx);
   assert(!raw->called_);  // process() must never be called on a failed-init processor

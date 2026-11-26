@@ -38,9 +38,9 @@ struct AudioStreamConfig
   uint8_t channels = 1;
   uint8_t sample_format = 16;  // bit depth
 
-  uint32_t frame_duration_ms = 20;      // processing frame size, independent of backend fragment
-  uint32_t fragment_duration_ms = 0;     // 0 = backend default (capture)
-  uint32_t buffer_duration_ms = 0;       // 0 = backend default (playback)
+  uint32_t frame_duration_ms = 20;    // processing frame size, independent of backend fragment
+  uint32_t fragment_duration_ms = 0;  // 0 = backend default (capture)
+  uint32_t buffer_duration_ms = 0;    // 0 = backend default (playback)
 
   bool publish_pcm = false;
   bool need_timestamp = false;

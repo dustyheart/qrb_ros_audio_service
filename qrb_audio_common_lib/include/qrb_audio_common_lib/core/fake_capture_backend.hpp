@@ -66,8 +66,8 @@ public:
     uint32_t bytes_per_sample = config_.sample_format / 8;
 
     AudioFrame frame;
-    frame.data = std::make_shared<std::vector<uint8_t>>(
-        samples * config_.channels * bytes_per_sample, 0);
+    frame.data =
+        std::make_shared<std::vector<uint8_t>>(samples * config_.channels * bytes_per_sample, 0);
     frame.sample_rate = config_.sample_rate;
     frame.channels = config_.channels;
     frame.sample_format = config_.sample_format;

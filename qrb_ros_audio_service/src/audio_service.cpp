@@ -54,7 +54,8 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
             latency_log_enabled_ = param.as_bool();
             RCLCPP_INFO(this->get_logger(), "enable_latency_log set to %s",
                 latency_log_enabled_ ? "true" : "false");
-          } else if (param.get_name() == "capture_device" || param.get_name() == "playback_device" ||
+          } else if (param.get_name() == "capture_device" ||
+                     param.get_name() == "playback_device" ||
                      param.get_name() == "capture_fragment_duration_ms" ||
                      param.get_name() == "playback_buffer_duration_ms") {
             backend_param_changed = true;
@@ -111,14 +112,15 @@ builtin_interfaces::msg::Time AudioServer::to_ros_stamp(uint32_t am_handle,
         "stream 0x%x: timestamp base set (monotonic %ld ns <-> ROS %ld ns)%s", am_handle,
         static_cast<long>(base.mono_ns), static_cast<long>(base.ros_ns),
         sim ? "; WARNING: use_sim_time is active, stamps advance at real (monotonic) rate "
-              "from the sim time sampled here"
-            : "");
+              "from the sim time sampled here" :
+              "");
   }
 
   int64_t ros_ns = 0;
   int32_t sec = 0;
   uint32_t nanosec = 0;
-  if (!core::map_monotonic_to_clock_ns(capture_time_mono_usec, base.mono_ns, base.ros_ns, &ros_ns) ||
+  if (!core::map_monotonic_to_clock_ns(
+          capture_time_mono_usec, base.mono_ns, base.ros_ns, &ros_ns) ||
       !core::split_time_ns(ros_ns, &sec, &nanosec)) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
         "stream 0x%x: capture time %lu us not representable on ROS clock, publishing zero "
@@ -315,8 +317,8 @@ void AudioServer::service_callback(const std::shared_ptr<rmw_request_id_t> reque
         if (!((source.empty() && !pub_pcm) || (0 == channels) || (0 == sample_rate) ||
                 (0 == sample_format))) {
           try {
-            stream_handle_by_create = am->create_record_stream(sample_rate, channels,
-                sample_format, coding_format, source, pub_pcm, topic_name, need_timestamp);
+            stream_handle_by_create = am->create_record_stream(sample_rate, channels, sample_format,
+                coding_format, source, pub_pcm, topic_name, need_timestamp);
             ret = true;
             if (pub_pcm || !topic_name.empty())
               create_pcm_topic(stream_handle_by_create, topic_name, true);
@@ -384,13 +386,13 @@ void AudioServer::declare_backend_parameters()
       "Capture fragment size requested from the backend, in milliseconds. Lower values "
       "reduce latency at the cost of more frequent wakeups. 0 means use the library default "
       "(80ms).";
-  capture_fragment_desc.integer_range = { duration_range };
+  capture_fragment_desc.integer_range = {duration_range};
 
   rcl_interfaces::msg::ParameterDescriptor playback_buffer_desc;
   playback_buffer_desc.description =
       "Playback pre-buffer/minreq size requested from the backend, in milliseconds. 0 means "
       "use the library default (300ms).";
-  playback_buffer_desc.integer_range = { duration_range };
+  playback_buffer_desc.integer_range = {duration_range};
 
   this->declare_parameter<std::string>("capture_device", "", device_desc);
   this->declare_parameter<std::string>("playback_device", "", device_desc);
@@ -435,10 +437,10 @@ void AudioServer::apply_backend_parameters(const std::vector<rclcpp::Parameter> 
   qrb::audio_manager::AudioBackendDefaults defaults;
   defaults.capture_device = pending_or_current_string(this, pending, "capture_device");
   defaults.playback_device = pending_or_current_string(this, pending, "playback_device");
-  defaults.capture_fragment_duration_ms = static_cast<uint32_t>(
-      pending_or_current_int(this, pending, "capture_fragment_duration_ms"));
-  defaults.playback_buffer_duration_ms = static_cast<uint32_t>(
-      pending_or_current_int(this, pending, "playback_buffer_duration_ms"));
+  defaults.capture_fragment_duration_ms =
+      static_cast<uint32_t>(pending_or_current_int(this, pending, "capture_fragment_duration_ms"));
+  defaults.playback_buffer_duration_ms =
+      static_cast<uint32_t>(pending_or_current_int(this, pending, "playback_buffer_duration_ms"));
 
   AudioManager::set_backend_defaults(defaults);
 }

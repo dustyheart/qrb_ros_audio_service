@@ -56,7 +56,7 @@ private:
   AudioStreamConfig config_;
   FrameCallback callback_;
   uint32_t stream_handle_ = 0;
-  std::atomic<AudioBackendStatus> status_{ AudioBackendStatus::kUnconnected };
+  std::atomic<AudioBackendStatus> status_{AudioBackendStatus::kUnconnected};
   uint64_t sequence_ = 0;
   // Only touched on the PulseAudio mainloop thread (data callback) after
   // start(); recreated by start() so each run gets a fresh timeline.

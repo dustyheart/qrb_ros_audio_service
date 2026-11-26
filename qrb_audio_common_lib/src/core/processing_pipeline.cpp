@@ -30,7 +30,7 @@ bool ProcessingPipeline::add_processor(std::unique_ptr<IAudioProcessor> processo
     stats.health = ProcessorHealth::kFailed;
   }
 
-  processors_.push_back(Entry{ std::move(processor) });
+  processors_.push_back(Entry{std::move(processor)});
   stats_.push_back(std::move(stats));
   return true;
 }

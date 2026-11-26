@@ -28,8 +28,8 @@ RecordStream::RecordStream(uint32_t stream_handle,
                                       << ", channels " << static_cast<int>(channels)
                                       << ", sample_format " << static_cast<int>(sample_format)
                                       << ", coding_format " << coding_format << ", pub_pcm "
-                                      << pub_pcm << ", pub_name " << pub_name
-                                      << ", need_timestamp " << need_timestamp);
+                                      << pub_pcm << ", pub_name " << pub_name << ", need_timestamp "
+                                      << need_timestamp);
 
   stream_configs_.type = StreamType::RECORD;
   stream_configs_.source = source;

@@ -356,12 +356,14 @@ int PulseCommonStream::list_sources(std::vector<std::string> & names)
   if (!check_context_ready())
     return -EIO;
 
-  SourceListQuery query{ pulse_mainloop_, &names };
+  SourceListQuery query{pulse_mainloop_, &names};
 
   pa_threaded_mainloop_lock(pulse_mainloop_);
-  pa_operation * op = pa_context_get_source_info_list(pulse_context_, source_info_list_callback, &query);
+  pa_operation * op =
+      pa_context_get_source_info_list(pulse_context_, source_info_list_callback, &query);
   if (op == nullptr) {
-    LOGE("pa_context_get_source_info_list failed: %s", pa_strerror(pa_context_errno(pulse_context_)));
+    LOGE("pa_context_get_source_info_list failed: %s",
+        pa_strerror(pa_context_errno(pulse_context_)));
     pa_threaded_mainloop_unlock(pulse_mainloop_);
     return -EIO;
   }
@@ -451,17 +453,17 @@ uint32_t PulseCommonStream::audio_stream_open(const AudioStreamInfo & stream_inf
 
   try {
     if (stream_info.type == StreamType::Playback) {
-      uint32_t buffer_duration_ms = stream_info.buffer_duration_ms
-                                         ? stream_info.buffer_duration_ms
-                                         : DEFAULT_PLAYBACK_BUFFER_DURATION_MS;
+      uint32_t buffer_duration_ms = stream_info.buffer_duration_ms ?
+                                        stream_info.buffer_duration_ms :
+                                        DEFAULT_PLAYBACK_BUFFER_DURATION_MS;
       stream = new PlaybackStream(
           string(stream_info.file_path), streasample_spec, stream_info.device, buffer_duration_ms);
     } else if (stream_info.type == StreamType::Capture) {
-      uint32_t fragment_duration_ms = stream_info.fragment_duration_ms
-                                           ? stream_info.fragment_duration_ms
-                                           : DEFAULT_CAPTURE_FRAGMENT_DURATION_MS;
-      stream = new CaptureStream(
-          string(stream_info.file_path), streasample_spec, stream_info.device, fragment_duration_ms);
+      uint32_t fragment_duration_ms = stream_info.fragment_duration_ms ?
+                                          stream_info.fragment_duration_ms :
+                                          DEFAULT_CAPTURE_FRAGMENT_DURATION_MS;
+      stream = new CaptureStream(string(stream_info.file_path), streasample_spec,
+          stream_info.device, fragment_duration_ms);
     } else {
       stream = nullptr;
     }
@@ -674,10 +676,8 @@ int PlaybackStream::start_stream()
 
   buffer_attr.maxlength = (uint32_t)-1;
   buffer_attr.tlength = (uint32_t)-1;
-  buffer_attr.prebuf =
-      pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
-  buffer_attr.minreq =
-      pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
+  buffer_attr.prebuf = pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
+  buffer_attr.minreq = pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
   buffer_attr.fragsize = (uint32_t)-1;
 
   pa_cvolume_set(&volume, sample_spec->channels, PA_VOLUME_NORM * stream_volume / STREAM_VOL_MAX);

@@ -13,12 +13,12 @@ using namespace qrb::audio_common_lib::core;
 
 static int g_failures = 0;
 
-#define CHECK(cond)                                                    \
-  do {                                                                 \
-    if (!(cond)) {                                                     \
-      std::fprintf(stderr, "%s:%d CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
-      ++g_failures;                                                    \
-    }                                                                  \
+#define CHECK(cond)                                                                                \
+  do {                                                                                             \
+    if (!(cond)) {                                                                                 \
+      std::fprintf(stderr, "%s:%d CHECK failed: %s\n", __FILE__, __LINE__, #cond);                 \
+      ++g_failures;                                                                                \
+    }                                                                                              \
   } while (0)
 
 static AudioStreamConfig valid_config()
@@ -36,14 +36,14 @@ int main()
 {
   CHECK(validate_capture_config(valid_config()).ok());
 
-  for (uint8_t bits : { 8, 16, 24, 32 }) {
+  for (uint8_t bits : {8, 16, 24, 32}) {
     auto c = valid_config();
     c.sample_format = bits;
     CHECK(validate_capture_config(c).ok());
   }
 
   // The exact case the legacy path used to silently record as S16.
-  for (uint8_t bits : { 0, 12, 20, 64 }) {
+  for (uint8_t bits : {0, 12, 20, 64}) {
     auto c = valid_config();
     c.sample_format = bits;
     Result r = validate_capture_config(c);

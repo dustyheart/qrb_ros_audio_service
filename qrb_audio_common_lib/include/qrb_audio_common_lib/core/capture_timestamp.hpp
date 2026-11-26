@@ -25,7 +25,8 @@ inline uint64_t monotonic_now_usec()
 {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return static_cast<uint64_t>(ts.tv_sec) * 1000000ull + static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
+  return static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
+         static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
 }
 
 // Turns "a chunk of N sample frames was just read" into "the first sample of
@@ -172,16 +173,15 @@ private:
 
   double predict(uint64_t x) const
   {
-    return static_cast<double>(base_y_) + intercept_ +
-           slope_ * static_cast<double>(x - base_x_);
+    return static_cast<double>(base_y_) + intercept_ + slope_ * static_cast<double>(x - base_x_);
   }
 
   void push(double px, double py)
   {
     // Drop points older than the window (by x span, i.e. audio time) or
     // beyond capacity; ring buffer, oldest at head_.
-    while (count_ > 0 && (count_ == kMaxPoints ||
-                          (px - xs_[head_]) * (1e6 / sample_rate_) > static_cast<double>(window_usec_))) {
+    while (count_ > 0 && (count_ == kMaxPoints || (px - xs_[head_]) * (1e6 / sample_rate_) >
+                                                      static_cast<double>(window_usec_))) {
       head_ = (head_ + 1) % kMaxPoints;
       count_--;
     }
@@ -212,7 +212,8 @@ private:
     double b = nominal;
     // Need half a second of audio in the window before trusting a
     // measured slope; until then assume the nominal rate.
-    double span_usec = count_ > 1 ? (xs_[(head_ + count_ - 1) % kMaxPoints] - xs_[head_]) * nominal : 0;
+    double span_usec =
+        count_ > 1 ? (xs_[(head_ + count_ - 1) % kMaxPoints] - xs_[head_]) * nominal : 0;
     if (count_ >= 3 && sxx > 0 && span_usec >= kMinFitSpanUsec) {
       b = sxy / sxx;
       if (b < 0.85 * nominal)

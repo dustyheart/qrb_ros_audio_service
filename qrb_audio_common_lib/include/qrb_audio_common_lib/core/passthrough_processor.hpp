@@ -22,7 +22,7 @@ public:
   Result configure(const ProcessorConfig &) override { return Result::Ok(); }
   ProcessResult process(AudioFrame &, const ProcessingContext &) override
   {
-    return ProcessResult{ ProcessResultStatus::kBypassed, Result::Ok() };
+    return ProcessResult{ProcessResultStatus::kBypassed, Result::Ok()};
   }
   void reset() override {}
 };
@@ -37,8 +37,8 @@ public:
   Result configure(const ProcessorConfig &) override { return Result::Ok(); }
   ProcessResult process(AudioFrame &, const ProcessingContext &) override
   {
-    return ProcessResult{ ProcessResultStatus::kFailed,
-      Result::Error(ErrorCode::kProcessorProcessFailed, "injected failure") };
+    return ProcessResult{ProcessResultStatus::kFailed,
+        Result::Error(ErrorCode::kProcessorProcessFailed, "injected failure")};
   }
   void reset() override {}
 };

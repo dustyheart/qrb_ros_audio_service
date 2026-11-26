@@ -18,9 +18,9 @@ namespace core
 
 // Limits shared by every capture backend. Kept free of PulseAudio headers so
 // this stays usable (and unit-testable) without any audio server.
-constexpr uint32_t kMaxSampleRate = 384000;     // PA_RATE_MAX on older libpulse; conservative
-constexpr uint8_t kMaxChannels = 32;            // PA_CHANNELS_MAX
-constexpr uint32_t kMaxDurationMs = 2000;       // matches the ROS param integer_range
+constexpr uint32_t kMaxSampleRate = 384000;  // PA_RATE_MAX on older libpulse; conservative
+constexpr uint8_t kMaxChannels = 32;         // PA_CHANNELS_MAX
+constexpr uint32_t kMaxDurationMs = 2000;    // matches the ROS param integer_range
 
 inline bool is_supported_sample_format(uint8_t bits)
 {
@@ -39,19 +39,20 @@ inline bool is_supported_sample_format(uint8_t bits)
 inline Result validate_capture_config(const AudioStreamConfig & config)
 {
   if (!is_supported_sample_format(config.sample_format)) {
-    return Result::Error(ErrorCode::kUnsupportedFormat,
-        "sample_format " + std::to_string(config.sample_format) +
-            " not supported (expected 8, 16, 24 or 32)");
+    return Result::Error(ErrorCode::kUnsupportedFormat, "sample_format " +
+                                                            std::to_string(config.sample_format) +
+                                                            " not supported (expected 8, 16, 24 or "
+                                                            "32)");
   }
   if (config.channels == 0 || config.channels > kMaxChannels) {
-    return Result::Error(ErrorCode::kInvalidConfig,
-        "channels " + std::to_string(config.channels) + " out of range [1, " +
-            std::to_string(kMaxChannels) + "]");
+    return Result::Error(ErrorCode::kInvalidConfig, "channels " + std::to_string(config.channels) +
+                                                        " out of range [1, " +
+                                                        std::to_string(kMaxChannels) + "]");
   }
   if (config.sample_rate == 0 || config.sample_rate > kMaxSampleRate) {
-    return Result::Error(ErrorCode::kInvalidConfig,
-        "sample_rate " + std::to_string(config.sample_rate) + " out of range [1, " +
-            std::to_string(kMaxSampleRate) + "]");
+    return Result::Error(
+        ErrorCode::kInvalidConfig, "sample_rate " + std::to_string(config.sample_rate) +
+                                       " out of range [1, " + std::to_string(kMaxSampleRate) + "]");
   }
   if (config.fragment_duration_ms > kMaxDurationMs) {
     return Result::Error(ErrorCode::kInvalidConfig,
@@ -59,9 +60,9 @@ inline Result validate_capture_config(const AudioStreamConfig & config)
             " out of range [0, " + std::to_string(kMaxDurationMs) + "]");
   }
   if (config.frame_duration_ms == 0 || config.frame_duration_ms > kMaxDurationMs) {
-    return Result::Error(ErrorCode::kInvalidConfig,
-        "frame_duration_ms " + std::to_string(config.frame_duration_ms) + " out of range [1, " +
-            std::to_string(kMaxDurationMs) + "]");
+    return Result::Error(
+        ErrorCode::kInvalidConfig, "frame_duration_ms " + std::to_string(config.frame_duration_ms) +
+                                       " out of range [1, " + std::to_string(kMaxDurationMs) + "]");
   }
   return Result::Ok();
 }
