@@ -20,13 +20,21 @@ namespace audio_common_lib
 namespace core
 {
 
-// Names create_processor() understands. Stage 4 ships only test/bypass
-// processors; WebRTC NS/VAD are added here in stage 5.
-//   passthrough             - touches nothing, flags frames kBypassed
-//   test_delay              - sleeps delay_us (default 1000) per block, then
-//                             passes the block through; TEST ONLY, used to
-//                             prove a slow processor cannot stall capture
+// Names create_processor() understands:
+//   passthrough  - touches nothing, flags frames kBypassed
+//   test_delay   - sleeps delay_us (default 1000) per block, then passes the
+//                  block through; TEST ONLY, used to prove a slow processor
+//                  cannot stall capture
+//   ns           - WebRTC noise suppression; level=low|moderate|high|very_high,
+//                  highpass=true|false (default false)
+//   vad          - WebRTC voice activity detection (sets AudioFrame::voice);
+//                  likelihood=very_low|low|moderate|high (default very_low),
+//                  hangover_ms=0..2000 (default 300), highpass=true|false
+//                  (default false; analysis copy only)
+// ns/vad exist only if the library was built with webrtc-audio-processing
+// (see webrtc_processors_available()); recommended order: ns, vad.
 std::vector<std::string> known_processor_names();
+bool webrtc_processors_available();
 
 std::unique_ptr<IAudioProcessor> create_processor(const std::string & name);
 

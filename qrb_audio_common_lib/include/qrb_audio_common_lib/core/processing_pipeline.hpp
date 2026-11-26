@@ -65,6 +65,12 @@ public:
   // output (refactoring_plan.md section 6.4).
   void process(AudioFrame & frame, const ProcessingContext & context);
 
+  // Calls prepare(context) on every healthy stage. A stage that rejects the
+  // stream format is marked kFailed with init_error set and is bypassed
+  // (frames flagged kBypassed) for the rest of this pipeline's life; the
+  // stream itself keeps running. Returns the names of the stages bypassed.
+  std::vector<std::string> prepare(const ProcessingContext & context);
+
   void reset_all();
 
   size_t processor_count() const { return processors_.size(); }

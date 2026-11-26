@@ -61,6 +61,21 @@ Result ProcessingCaptureBackend::configure(const AudioStreamConfig & config)
   context_.sample_rate = config.sample_rate;
   context_.channels = config.channels;
   context_.frame_duration_ms = config.frame_duration_ms;
+  context_.sample_format = config.sample_format;
+  if (pipeline_) {
+    // Format the processor can't handle: keep streaming unprocessed rather
+    // than failing create - the chain is node-wide, and a client asking for
+    // e.g. 24-bit capture has no per-request way to opt out (until stage 3).
+    for (const auto & name : pipeline_->prepare(context_)) {
+      for (const auto & st : pipeline_->stats()) {
+        if (st.name == name) {
+          LOGE("processor %s BYPASSED for this stream (%u Hz, %u ch, %u-bit): %s", name.c_str(),
+              config.sample_rate, static_cast<unsigned>(config.channels),
+              static_cast<unsigned>(config.sample_format), st.init_error.c_str());
+        }
+      }
+    }
+  }
   configured_ = true;
   return Result::Ok();
 }

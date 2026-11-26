@@ -11,6 +11,22 @@ find_package(Threads REQUIRED)
 pkg_check_modules(ALSA REQUIRED alsa)
 pkg_check_modules(SNDFILE REQUIRED sndfile)
 
+# Optional: WebRTC NS/VAD processors ("ns", "vad"). Without the library
+# everything else builds and works; asking for ns/vad then fails with a
+# message naming the missing package.
+option(QRB_AUDIO_ENABLE_WEBRTC "Build WebRTC NS/VAD processors if webrtc-audio-processing is found" ON)
+if(QRB_AUDIO_ENABLE_WEBRTC)
+  pkg_check_modules(WEBRTC_APM QUIET webrtc-audio-processing)
+endif()
+if(WEBRTC_APM_FOUND)
+  message(STATUS "qrb_audio_common_lib: WebRTC NS/VAD enabled (webrtc-audio-processing ${WEBRTC_APM_VERSION})")
+elseif(QRB_AUDIO_ENABLE_WEBRTC)
+  message(WARNING "qrb_audio_common_lib: webrtc-audio-processing not found - 'ns'/'vad' capture "
+                  "processors are disabled. Install libwebrtc-audio-processing-dev to enable them.")
+else()
+  message(STATUS "qrb_audio_common_lib: WebRTC NS/VAD disabled (QRB_AUDIO_ENABLE_WEBRTC=OFF)")
+endif()
+
 add_library(${PROJECT_NAME} SHARED
   src/audio_stream.cpp
   src/alsa_stream.cpp
@@ -21,6 +37,15 @@ add_library(${PROJECT_NAME} SHARED
   src/core/processing_capture_backend.cpp
   src/core/processor_factory.cpp
 )
+
+if(WEBRTC_APM_FOUND)
+  target_sources(${PROJECT_NAME} PRIVATE src/core/webrtc_processors.cpp)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE QRB_AUDIO_HAVE_WEBRTC_APM)
+  target_compile_options(${PROJECT_NAME} PRIVATE ${WEBRTC_APM_CFLAGS_OTHER})
+  # SYSTEM: the 0.3.1 headers trigger -Wunused-parameter on their own code.
+  target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${WEBRTC_APM_INCLUDE_DIRS})
+  target_link_libraries(${PROJECT_NAME} PRIVATE ${WEBRTC_APM_LIBRARIES})
+endif()
 
 target_include_directories(${PROJECT_NAME}
   PUBLIC
@@ -79,6 +104,17 @@ if(BUILD_TESTING)
   target_include_directories(core_processing_backend_test PRIVATE include)
   target_link_libraries(core_processing_backend_test ${PROJECT_NAME})
   add_test(NAME core_processing_backend_test COMMAND core_processing_backend_test)
+
+  add_executable(core_vad_hangover_test test/core_vad_hangover_test.cpp)
+  target_include_directories(core_vad_hangover_test PRIVATE include)
+  add_test(NAME core_vad_hangover_test COMMAND core_vad_hangover_test)
+
+  if(WEBRTC_APM_FOUND)
+    add_executable(core_webrtc_processors_test test/core_webrtc_processors_test.cpp)
+    target_include_directories(core_webrtc_processors_test PRIVATE include)
+    target_link_libraries(core_webrtc_processors_test ${PROJECT_NAME})
+    add_test(NAME core_webrtc_processors_test COMMAND core_webrtc_processors_test)
+  endif()
 
   # Hardware-dependent; not registered with CTest, built for manual use only.
   add_executable(manual_pipewire_backend_capture test/manual_pipewire_backend_capture.cpp)

@@ -186,6 +186,7 @@ static bool audio_common_stream_cb(const void * const payload,
               StreamDataInfo info;
               info.read_duration_usec = frame.read_duration_usec;
               info.capture_time_mono_usec = frame.timestamp_usec;
+              info.voice_activity = static_cast<int8_t>(frame.voice);
               g_stream_data_cb(am_handle, frame.data, info);
             }
           });

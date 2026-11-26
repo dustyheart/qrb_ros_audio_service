@@ -82,6 +82,9 @@ struct StreamDataInfo
   // available (need_timestamp=false, or the record-to-file legacy path which
   // does not support timestamps).
   uint64_t capture_time_mono_usec = 0;
+  // VAD decision for this chunk when the capture chain has a "vad" stage:
+  // -1 unknown (no VAD, or VAD bypassed/failed for it), 0 no voice, 1 voice.
+  int8_t voice_activity = -1;
 };
 
 using stream_data_cb_t =

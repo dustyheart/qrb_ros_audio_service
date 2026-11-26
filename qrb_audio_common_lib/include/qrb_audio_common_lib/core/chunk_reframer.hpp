@@ -101,6 +101,7 @@ private:
     uint64_t start_frame = 0;
     size_t bytes = 0;
     uint32_t extra_flags = 0;
+    VoiceActivity voice = VoiceActivity::kUnknown;
   };
 
   void run_block(size_t bytes, const BlockFn & on_block)
@@ -114,7 +115,7 @@ private:
         in_.begin() + static_cast<std::ptrdiff_t>(in_off_ + bytes));
     in_off_ += bytes;
 
-    AudioFrame block;
+    AudioFrame block;  // voice starts kUnknown; a VAD stage sets it
     block.data = block_buf_;
     block.frame_count = static_cast<uint32_t>(bytes / bytes_per_frame_);
     block.sequence = blocks_processed_;
@@ -151,6 +152,13 @@ private:
     out_.insert(out_.end(), src, src + bytes);
     processed_frames_ = last;
     mark_overlap(first, last, added & ~static_cast<uint32_t>(FrameFlag::kDropped));
+    if (block.voice != VoiceActivity::kUnknown) {
+      for (auto & p : pending_) {
+        const uint64_t p_end = p.start_frame + p.bytes / bytes_per_frame_;
+        if (p.start_frame < last && p_end > first && block.voice > p.voice)
+          p.voice = block.voice;
+      }
+    }
   }
 
   void mark_overlap(uint64_t first, uint64_t last, uint32_t flags)
@@ -171,6 +179,7 @@ private:
       pending_.pop_front();
       AudioFrame chunk = std::move(p.meta);
       chunk.flags |= p.extra_flags;
+      chunk.voice = p.voice;
       chunk.data = std::make_shared<std::vector<uint8_t>>(
           out_.begin() + static_cast<std::ptrdiff_t>(out_off_),
           out_.begin() + static_cast<std::ptrdiff_t>(out_off_ + p.bytes));

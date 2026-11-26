@@ -12,6 +12,7 @@
   <depend>rclcpp</depend>
   <depend>rclcpp_components</depend>
   <depend>builtin_interfaces</depend>
+  <depend>std_msgs</depend>
   <depend>qrb_ros_audio_service_msgs</depend>
   <depend>qrb_audio_manager</depend>
   <depend>qrb_audio_common_lib</depend>

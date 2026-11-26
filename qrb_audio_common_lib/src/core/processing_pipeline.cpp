@@ -44,7 +44,10 @@ void ProcessingPipeline::process(AudioFrame & frame, const ProcessingContext & c
     ProcessorStats & stats = stats_[i];
 
     if (stats.health == ProcessorHealth::kFailed) {
-      continue;  // never ran; configure() already failed, leave frame untouched
+      // Never runs (configure() or prepare() failed). The frame did not get
+      // the processing the chain asked for, so say so.
+      frame.flags = static_cast<uint32_t>(FrameFlag::kBypassed) | frame.flags;
+      continue;
     }
 
     if (stats.health == ProcessorHealth::kDegraded) {
@@ -80,6 +83,22 @@ void ProcessingPipeline::process(AudioFrame & frame, const ProcessingContext & c
         break;
     }
   }
+}
+
+std::vector<std::string> ProcessingPipeline::prepare(const ProcessingContext & context)
+{
+  std::vector<std::string> bypassed;
+  for (size_t i = 0; i < processors_.size(); ++i) {
+    if (stats_[i].health == ProcessorHealth::kFailed)
+      continue;
+    Result r = processors_[i].processor->prepare(context);
+    if (!r.ok()) {
+      stats_[i].health = ProcessorHealth::kFailed;
+      stats_[i].init_error = r.to_log_string();
+      bypassed.push_back(stats_[i].name);
+    }
+  }
+  return bypassed;
 }
 
 void ProcessingPipeline::reset_all()

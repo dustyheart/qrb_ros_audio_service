@@ -61,19 +61,10 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
           } else if (param.get_name() == "capture_device" ||
                      param.get_name() == "playback_device" ||
                      param.get_name() == "capture_fragment_duration_ms" ||
-                     param.get_name() == "playback_buffer_duration_ms") {
-            backend_param_changed = true;
-          } else if (param.get_name() == "capture_processors") {
-            std::vector<qrb::audio_common_lib::core::ProcessorSlot> slots;
-            auto parsed = parse_processor_specs(param.as_string_array(), slots);
-            if (!parsed.ok()) {
-              // Reject instead of applying a partial chain.
-              result.successful = false;
-              result.reason = parsed.to_log_string();
-              RCLCPP_ERROR(
-                  this->get_logger(), "capture_processors rejected: %s", result.reason.c_str());
-              return result;
-            }
+                     param.get_name() == "playback_buffer_duration_ms" ||
+                     param.get_name() == "capture_processors" || param.get_name() == "ns_level" ||
+                     param.get_name() == "vad_likelihood" ||
+                     param.get_name() == "vad_hangover_ms") {
             backend_param_changed = true;
           }
         }
@@ -84,7 +75,17 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
           // apply_backend_parameters() can prefer them over the (still-stale)
           // stored values. Only affects streams created after this point;
           // existing streams keep the config they were opened with.
-          apply_backend_parameters(&params);
+          qrb::audio_manager::AudioBackendDefaults defaults;
+          auto built = build_backend_defaults(&params, defaults);
+          if (!built.ok()) {
+            // Reject the whole set instead of applying a partial/invalid chain.
+            result.successful = false;
+            result.reason = built.to_log_string();
+            RCLCPP_ERROR(
+                this->get_logger(), "parameter change rejected: %s", result.reason.c_str());
+            return result;
+          }
+          AudioManager::set_backend_defaults(defaults);
         }
         return result;
       });
@@ -157,12 +158,16 @@ void AudioServer::on_stream_data(uint32_t am_handle,
   bool log_enabled = latency_log_enabled_.load();
 
   rclcpp::Publisher<AudioData>::SharedPtr pub;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr vad_pub;
   {
     std::lock_guard<std::mutex> lock(capture_pubs_mutex_);
     auto it = capture_pubs_.find(am_handle);
     if (it == capture_pubs_.end())
       return;
     pub = it->second;
+    auto vit = vad_pubs_.find(am_handle);
+    if (vit != vad_pubs_.end())
+      vad_pub = vit->second;
   }
 
   std::chrono::steady_clock::time_point publish_start;
@@ -175,6 +180,11 @@ void AudioServer::on_stream_data(uint32_t am_handle,
   if (data_buf)
     msg.data = std::move(*data_buf);
   pub->publish(msg);
+  if (vad_pub && info.voice_activity >= 0) {
+    std_msgs::msg::Bool vad;
+    vad.data = info.voice_activity > 0;
+    vad_pub->publish(vad);
+  }
 
   if (log_enabled) {
     auto t2 = std::chrono::steady_clock::now();
@@ -270,6 +280,7 @@ void AudioServer::delete_pcm_topic(uint32_t stream_handle)
   {
     std::lock_guard<std::mutex> lock(capture_pubs_mutex_);
     capture_pubs_.erase(stream_handle);
+    vad_pubs_.erase(stream_handle);
   }
   playback_subs_.erase(stream_handle);
   std::lock_guard<std::mutex> lock(stamp_bases_mutex_);
@@ -346,8 +357,23 @@ void AudioServer::service_callback(const std::shared_ptr<rmw_request_id_t> reque
             stream_handle_by_create = am->create_record_stream(sample_rate, channels, sample_format,
                 coding_format, source, pub_pcm, topic_name, need_timestamp);
             ret = true;
-            if (pub_pcm || !topic_name.empty())
+            if (pub_pcm || !topic_name.empty()) {
               create_pcm_topic(stream_handle_by_create, topic_name, true);
+              // Only the streaming path (no destination file) runs the
+              // processing chain; the chain is what OPEN just used.
+              bool has_vad = false;
+              for (const auto & slot : AudioManager::get_backend_defaults().capture_processors)
+                has_vad |= slot.name == "vad" && !slot.bypassed;
+              if (source.empty() && has_vad) {
+                const std::string vad_topic =
+                    topic_name + this->get_parameter("vad_topic_suffix").as_string();
+                auto vad_pub = this->create_publisher<std_msgs::msg::Bool>(vad_topic, 10);
+                std::lock_guard<std::mutex> lock(capture_pubs_mutex_);
+                vad_pubs_[stream_handle_by_create] = vad_pub;
+                RCLCPP_INFO(this->get_logger(), "stream 0x%x: VAD decisions on %s",
+                    stream_handle_by_create, vad_topic.c_str());
+              }
+            }
           } catch (const std::exception & e) {
             RCLCPP_ERROR(this->get_logger(), "%s", e.what());
           }
@@ -429,9 +455,40 @@ void AudioServer::declare_backend_parameters()
   processors_desc.description =
       "Processing chain for streaming capture (pub_pcm) streams, in order. Each entry is "
       "\"name\" or \"name:key=value,key=value\". Empty means no processing. Applies to "
-      "streams created afterwards. Known names: passthrough, test_delay (test only).";
+      "streams created afterwards. Known names: passthrough, test_delay (test only), ns, vad (if "
+      "built with "
+      "webrtc-audio-processing; recommended order ns, vad; see ns_level/vad_* params).";
   this->declare_parameter<std::vector<std::string>>(
       "capture_processors", std::vector<std::string>{}, processors_desc);
+
+  // Defaults for the "ns"/"vad" stages; a key given in the capture_processors
+  // entry itself (e.g. "ns:level=high") wins over these.
+  rcl_interfaces::msg::ParameterDescriptor ns_level_desc;
+  ns_level_desc.description =
+      "WebRTC noise suppression level for the 'ns' capture processor: low, moderate, high or "
+      "very_high.";
+  this->declare_parameter<std::string>("ns_level", "moderate", ns_level_desc);
+
+  rcl_interfaces::msg::ParameterDescriptor vad_likelihood_desc;
+  vad_likelihood_desc.description =
+      "WebRTC VAD likelihood for the 'vad' capture processor: very_low, low, moderate or high. "
+      "Higher reports voice more readily (less speech clipping, more false positives). Default "
+      "very_low: on the QCS9075 mic, moderate flagged the idle room as voice most of the time.";
+  this->declare_parameter<std::string>("vad_likelihood", "very_low", vad_likelihood_desc);
+
+  rcl_interfaces::msg::ParameterDescriptor vad_hangover_desc;
+  vad_hangover_desc.description =
+      "Keep the VAD decision 'voice' for this long (ms) after the last voiced 10 ms block, so "
+      "pauses between words don't toggle it.";
+  vad_hangover_desc.integer_range = {duration_range};
+  this->declare_parameter<int>("vad_hangover_ms", 300, vad_hangover_desc);
+
+  rcl_interfaces::msg::ParameterDescriptor vad_topic_desc;
+  vad_topic_desc.description =
+      "VAD decisions of a capture stream are published as std_msgs/Bool on "
+      "<pcm topic_name><vad_topic_suffix> (stage-5 stopgap, see audio_service.hpp). Applies to "
+      "streams created afterwards.";
+  this->declare_parameter<std::string>("vad_topic_suffix", "_vad", vad_topic_desc);
 }
 
 qrb::audio_common_lib::core::Result AudioServer::parse_processor_specs(
@@ -501,9 +558,12 @@ int64_t pending_or_current_int(rclcpp::Node * node,
 }
 }  // namespace
 
-void AudioServer::apply_backend_parameters(const std::vector<rclcpp::Parameter> * pending)
+qrb::audio_common_lib::core::Result AudioServer::build_backend_defaults(
+    const std::vector<rclcpp::Parameter> * pending,
+    qrb::audio_manager::AudioBackendDefaults & defaults)
 {
-  qrb::audio_manager::AudioBackendDefaults defaults;
+  namespace core = qrb::audio_common_lib::core;
+  defaults = qrb::audio_manager::AudioBackendDefaults{};
   defaults.capture_device = pending_or_current_string(this, pending, "capture_device");
   defaults.playback_device = pending_or_current_string(this, pending, "playback_device");
   defaults.capture_fragment_duration_ms =
@@ -511,15 +571,55 @@ void AudioServer::apply_backend_parameters(const std::vector<rclcpp::Parameter> 
   defaults.playback_buffer_duration_ms =
       static_cast<uint32_t>(pending_or_current_int(this, pending, "playback_buffer_duration_ms"));
 
-  // Already validated by the set-parameters callback; at startup an invalid
-  // value from a launch file/CLI fails node construction rather than
-  // silently running without the requested processing.
   auto parsed =
       parse_processor_specs(pending_or_current_string_array(this, pending, "capture_processors"),
           defaults.capture_processors);
   if (!parsed.ok())
-    throw std::invalid_argument("capture_processors: " + parsed.to_log_string());
+    return parsed;
 
+  const std::string ns_level = pending_or_current_string(this, pending, "ns_level");
+  const std::string vad_likelihood = pending_or_current_string(this, pending, "vad_likelihood");
+  const std::string vad_hangover =
+      std::to_string(pending_or_current_int(this, pending, "vad_hangover_ms"));
+  for (auto & slot : defaults.capture_processors) {
+    if (slot.name == "ns") {
+      slot.config.emplace("level", ns_level);  // emplace: keys from the spec win
+    } else if (slot.name == "vad") {
+      slot.config.emplace("likelihood", vad_likelihood);
+      slot.config.emplace("hangover_ms", vad_hangover);
+    }
+  }
+
+  // Validate by running each stage's configure() (cheap: no APM is created
+  // before prepare()), so bad values fail here instead of at the next create.
+  std::unique_ptr<core::ProcessingPipeline> check;
+  auto valid = core::build_pipeline(defaults.capture_processors, check);
+  if (!valid.ok())
+    return valid;
+  if (core::webrtc_processors_available()) {
+    // Also when ns/vad are not in the chain yet, so a later chain change
+    // can't be the first to discover a bad ns_level.
+    std::vector<core::ProcessorSlot> probe(2);
+    probe[0].name = "ns";
+    probe[0].config["level"] = ns_level;
+    probe[1].name = "vad";
+    probe[1].config["likelihood"] = vad_likelihood;
+    probe[1].config["hangover_ms"] = vad_hangover;
+    valid = core::build_pipeline(probe, check);
+    if (!valid.ok())
+      return valid;
+  }
+  return core::Result::Ok();
+}
+
+void AudioServer::apply_backend_parameters(const std::vector<rclcpp::Parameter> * pending)
+{
+  // Startup: an invalid value from a launch file/CLI fails node construction
+  // rather than silently running without the requested processing.
+  qrb::audio_manager::AudioBackendDefaults defaults;
+  auto built = build_backend_defaults(pending, defaults);
+  if (!built.ok())
+    throw std::invalid_argument("invalid audio parameters: " + built.to_log_string());
   AudioManager::set_backend_defaults(defaults);
 }
 

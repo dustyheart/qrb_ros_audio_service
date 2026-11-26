@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "builtin_interfaces/msg/time.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "qrb_audio_manager/audio_manager.hpp"
 #include "qrb_ros_audio_service_msgs/msg/audio_data.hpp"
 #include "qrb_ros_audio_service_msgs/srv/audio_request.hpp"
@@ -49,7 +50,14 @@ private:
   // Read on the capture worker thread (on_stream_data), modified on service
   // threads (create/release of any stream), hence the mutex.
   std::unordered_map<uint32_t, rclcpp::Publisher<AudioData>::SharedPtr> capture_pubs_;
-  std::mutex capture_pubs_mutex_;
+  // Stage-5 STOPGAP: per-stream VAD decisions on "<pcm_topic><vad_topic_suffix>"
+  // as std_msgs/Bool, one message right after each PCM message of a stream
+  // whose capture chain has "vad" (no message while the decision is unknown).
+  // Bool carries no stream_handle/timestamp; pair it with the AudioData
+  // message it follows. To be replaced by a proper msg in qrb_ros_interfaces
+  // when stage 3 revises the interfaces.
+  std::unordered_map<uint32_t, rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr> vad_pubs_;
+  std::mutex capture_pubs_mutex_;  // guards capture_pubs_ and vad_pubs_
   std::unordered_map<uint32_t, rclcpp::Subscription<AudioData>::SharedPtr> playback_subs_;
 
   std::unordered_map<uint32_t, LatencyStats> capture_latency_stats_;
@@ -96,6 +104,9 @@ private:
   // If pending is non-null, values for names present in it take priority over
   // this->get_parameter() (which, when called from an on_set_parameters
   // callback, would still return the pre-change value - see call site).
+  qrb::audio_common_lib::core::Result build_backend_defaults(
+      const std::vector<rclcpp::Parameter> * pending,
+      qrb::audio_manager::AudioBackendDefaults & out);
   void apply_backend_parameters(const std::vector<rclcpp::Parameter> * pending = nullptr);
 };
 

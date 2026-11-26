@@ -46,6 +46,7 @@ struct ProcessingContext
   uint32_t sample_rate = 0;
   uint8_t channels = 0;
   uint32_t frame_duration_ms = 0;
+  uint8_t sample_format = 16;  // bit depth
 };
 
 // A single stage in a ProcessingPipeline (NS, VAD, AEC, or a test double).
@@ -69,6 +70,18 @@ public:
   // requires a full stream rebuild rather than a live reconfigure - see
   // refactoring_plan.md section 5.3 on which fields support hot-reconfigure).
   virtual Result configure(const ProcessorConfig & config) = 0;
+
+  // Called once per stream, after configure() and before the first
+  // process(), with the stream's real format. A processor that cannot handle
+  // the format (e.g. WebRTC needs 16-bit at 8/16/32/48 kHz in 10 ms blocks)
+  // returns an error here instead of failing every frame; the pipeline then
+  // bypasses it for this stream (see ProcessingPipeline::prepare). Must not
+  // throw. Default: any format is fine.
+  virtual Result prepare(const ProcessingContext & context)
+  {
+    (void)context;
+    return Result::Ok();
+  }
 
   // Mutates `frame` in place when status is kProcessed. Must not change
   // frame.sample_rate/channels/sample_format, frame.sequence or

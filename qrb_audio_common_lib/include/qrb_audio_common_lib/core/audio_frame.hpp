@@ -23,6 +23,15 @@ enum class FrameFlag : uint32_t
   kBypassed = 1u << 2,  // passed through a processor stage without being touched
 };
 
+// Voice activity decision attached to a frame by a VAD processor. Ordered so
+// that the "most active" of several values is simply the max.
+enum class VoiceActivity : int8_t
+{
+  kUnknown = -1,  // no VAD in the chain, VAD bypassed/failed, or not yet decided
+  kInactive = 0,
+  kActive = 1,
+};
+
 inline FrameFlag operator|(FrameFlag a, FrameFlag b)
 {
   return static_cast<FrameFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
@@ -59,6 +68,11 @@ struct AudioFrame
   uint64_t read_duration_usec = 0;
 
   uint32_t flags = static_cast<uint32_t>(FrameFlag::kNone);
+
+  // Set by a VAD processor on each processed block; ChunkReframer gives a
+  // re-assembled chunk the max over the blocks it overlaps (active if any
+  // part of it is active).
+  VoiceActivity voice = VoiceActivity::kUnknown;
 
   size_t byte_size() const { return data ? data->size() : 0; }
 };

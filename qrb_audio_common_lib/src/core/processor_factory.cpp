@@ -9,6 +9,10 @@
 
 #include "qrb_audio_common_lib/core/passthrough_processor.hpp"
 
+#ifdef QRB_AUDIO_HAVE_WEBRTC_APM
+#include "webrtc_processors.hpp"
+#endif
+
 namespace qrb
 {
 namespace audio_common_lib
@@ -56,9 +60,23 @@ private:
 
 }  // namespace
 
+bool webrtc_processors_available()
+{
+#ifdef QRB_AUDIO_HAVE_WEBRTC_APM
+  return true;
+#else
+  return false;
+#endif
+}
+
 std::vector<std::string> known_processor_names()
 {
-  return {"passthrough", "test_delay"};
+  std::vector<std::string> names{"passthrough", "test_delay"};
+  if (webrtc_processors_available()) {
+    names.push_back("ns");
+    names.push_back("vad");
+  }
+  return names;
 }
 
 std::unique_ptr<IAudioProcessor> create_processor(const std::string & name)
@@ -67,6 +85,12 @@ std::unique_ptr<IAudioProcessor> create_processor(const std::string & name)
     return std::make_unique<PassthroughProcessor>();
   if (name == "test_delay")
     return std::make_unique<TestDelayProcessor>();
+#ifdef QRB_AUDIO_HAVE_WEBRTC_APM
+  if (name == "ns")
+    return std::make_unique<WebRtcNsProcessor>();
+  if (name == "vad")
+    return std::make_unique<WebRtcVadProcessor>();
+#endif
   return nullptr;
 }
 
@@ -78,6 +102,14 @@ Result parse_processor_spec(const std::string & spec, ProcessorSlot & out)
   if (out.name.empty())
     return Result::Error(ErrorCode::kInvalidConfig, "processor spec '" + spec + "': empty name");
   if (!create_processor(out.name)) {
+    if ((out.name == "ns" || out.name == "vad") && !webrtc_processors_available()) {
+      return Result::Error(ErrorCode::kInvalidConfig, "processor '" + out.name +
+                                                          "' is not available: "
+                                                          "qrb_audio_common_lib was built without "
+                                                          "webrtc-audio-processing (install "
+                                                          "libwebrtc-audio-processing-dev and "
+                                                          "rebuild)");
+    }
     std::string known;
     for (const auto & n : known_processor_names())
       known += (known.empty() ? "" : ", ") + n;

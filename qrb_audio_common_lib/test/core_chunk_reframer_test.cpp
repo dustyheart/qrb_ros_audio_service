@@ -218,6 +218,36 @@ void test_stereo_and_long_run_bounded()
   std::printf("PASS test_stereo_and_long_run_bounded\n");
 }
 
+void test_voice_decision_reaches_chunks()
+{
+  // 3 chunks of 250 frames; blocks of 160. Only block 2 ([320, 480)) is
+  // voiced, so chunk 1 ([250, 500)) must be active and chunks 0 and 2 not.
+  ChunkReframer r(kBlock, kBpf);
+  std::vector<AudioFrame> out;
+  int n = 0;
+  auto vad = [&](AudioFrame & b) {
+    b.voice = (n++ == 2) ? VoiceActivity::kActive : VoiceActivity::kInactive;
+  };
+  auto sink = [&](AudioFrame && f) { out.push_back(std::move(f)); };
+  for (uint64_t c = 0; c < 3; ++c)
+    r.push(make_chunk(250, c * 250, c, 0), vad, sink);
+  r.flush(sink);
+  CHECK(out.size() == 3);
+  CHECK(out[0].voice == VoiceActivity::kInactive);
+  CHECK(out[1].voice == VoiceActivity::kActive);
+  // Chunk 2 ([500, 750)): blocks 3,4 inactive; its tail [640, 750) is never
+  // processed but the processed part decided -> inactive, not unknown.
+  CHECK(out[2].voice == VoiceActivity::kInactive);
+
+  // No VAD stage: decisions stay unknown.
+  ChunkReframer r2(kBlock, kBpf);
+  std::vector<AudioFrame> out2;
+  r2.push(
+      make_chunk(320, 0, 0, 0), add_one, [&](AudioFrame && f) { out2.push_back(std::move(f)); });
+  CHECK(out2.size() == 1 && out2[0].voice == VoiceActivity::kUnknown);
+  std::printf("PASS test_voice_decision_reaches_chunks\n");
+}
+
 }  // namespace
 
 int main()
@@ -227,6 +257,7 @@ int main()
   test_block_timestamps_and_dropped_flag();
   test_processor_flags_and_bad_resize();
   test_stereo_and_long_run_bounded();
+  test_voice_decision_reaches_chunks();
   std::printf("all core_chunk_reframer_test cases passed\n");
   return 0;
 }
