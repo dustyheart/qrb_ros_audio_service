@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "qrb_ros_audio_service/audio_service.hpp"
+#include "qrb_audio_common_lib/core/capture_timestamp.hpp"
 #include "qrb_audio_manager/audio_manager.hpp"
 // clang-format on
 
@@ -77,10 +78,64 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
   rclcpp::on_shutdown(std::bind(&AudioServer::shutdown_callback, this));
 }
 
+builtin_interfaces::msg::Time AudioServer::to_ros_stamp(uint32_t am_handle,
+    uint64_t capture_time_mono_usec)
+{
+  namespace core = qrb::audio_common_lib::core;
+  builtin_interfaces::msg::Time stamp;  // zero = "no timestamp", see AudioData.msg
+  if (capture_time_mono_usec == 0)
+    return stamp;
+
+  ClockBase base;
+  bool new_base = false;
+  {
+    std::lock_guard<std::mutex> lock(stamp_bases_mutex_);
+    auto it = stamp_bases_.find(am_handle);
+    if (it == stamp_bases_.end()) {
+      // Bracket the ROS clock read with two monotonic reads and take the
+      // midpoint, so the pair is consistent to within one clock read.
+      int64_t m1 = static_cast<int64_t>(core::monotonic_now_usec()) * 1000;
+      int64_t ros_ns = this->now().nanoseconds();
+      int64_t m2 = static_cast<int64_t>(core::monotonic_now_usec()) * 1000;
+      base.mono_ns = m1 + (m2 - m1) / 2;
+      base.ros_ns = ros_ns;
+      stamp_bases_[am_handle] = base;
+      new_base = true;
+    } else {
+      base = it->second;
+    }
+  }
+  if (new_base) {
+    bool sim = this->get_clock()->ros_time_is_active();
+    RCLCPP_INFO(this->get_logger(),
+        "stream 0x%x: timestamp base set (monotonic %ld ns <-> ROS %ld ns)%s", am_handle,
+        static_cast<long>(base.mono_ns), static_cast<long>(base.ros_ns),
+        sim ? "; WARNING: use_sim_time is active, stamps advance at real (monotonic) rate "
+              "from the sim time sampled here"
+            : "");
+  }
+
+  int64_t ros_ns = 0;
+  int32_t sec = 0;
+  uint32_t nanosec = 0;
+  if (!core::map_monotonic_to_clock_ns(capture_time_mono_usec, base.mono_ns, base.ros_ns, &ros_ns) ||
+      !core::split_time_ns(ros_ns, &sec, &nanosec)) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "stream 0x%x: capture time %lu us not representable on ROS clock, publishing zero "
+        "timestamp",
+        am_handle, static_cast<unsigned long>(capture_time_mono_usec));
+    return stamp;
+  }
+  stamp.sec = sec;
+  stamp.nanosec = nanosec;
+  return stamp;
+}
+
 void AudioServer::on_stream_data(uint32_t am_handle,
     std::shared_ptr<std::vector<uint8_t>> data_buf,
-    uint64_t usec)
+    const qrb::audio_manager::StreamDataInfo & info)
 {
+  uint64_t usec = info.read_duration_usec;
   bool log_enabled = latency_log_enabled_.load();
 
   auto it = capture_pubs_.find(am_handle);
@@ -93,6 +148,7 @@ void AudioServer::on_stream_data(uint32_t am_handle,
 
   AudioData msg;
   msg.stream_handle = am_handle;
+  msg.timestamp = to_ros_stamp(am_handle, info.capture_time_mono_usec);
   if (data_buf)
     msg.data = std::move(*data_buf);
   it->second->publish(msg);
@@ -188,6 +244,8 @@ void AudioServer::delete_pcm_topic(uint32_t stream_handle)
 {
   capture_pubs_.erase(stream_handle);
   playback_subs_.erase(stream_handle);
+  std::lock_guard<std::mutex> lock(stamp_bases_mutex_);
+  stamp_bases_.erase(stream_handle);
 }
 
 void AudioServer::service_callback(const std::shared_ptr<rmw_request_id_t> request_header,
@@ -214,6 +272,7 @@ void AudioServer::service_callback(const std::shared_ptr<rmw_request_id_t> reque
   auto pub_pcm = request->pub_pcm;
   auto topic_name = request->topic_name;
   auto mute = request->mute;
+  auto need_timestamp = request->need_timestamp;
 
   std::string play_mode = "normal";
   uint32_t stream_handle_by_create = 0;
@@ -250,14 +309,14 @@ void AudioServer::service_callback(const std::shared_ptr<rmw_request_id_t> reque
       } else if (type == "record") {
         RCLCPP_INFO(this->get_logger(),
             "source %s, channels %d, sample_rate %d, sample_format %d, "
-            "coding_format %s, pub_pcm %s, topic_name %s",
+            "coding_format %s, pub_pcm %s, topic_name %s, need_timestamp %s",
             source.c_str(), channels, sample_rate, sample_format, coding_format.c_str(),
-            (pub_pcm ? "true" : "false"), topic_name.c_str());
+            (pub_pcm ? "true" : "false"), topic_name.c_str(), (need_timestamp ? "true" : "false"));
         if (!((source.empty() && !pub_pcm) || (0 == channels) || (0 == sample_rate) ||
                 (0 == sample_format))) {
           try {
-            stream_handle_by_create = am->create_record_stream(
-                sample_rate, channels, sample_format, coding_format, source, pub_pcm, topic_name);
+            stream_handle_by_create = am->create_record_stream(sample_rate, channels,
+                sample_format, coding_format, source, pub_pcm, topic_name, need_timestamp);
             ret = true;
             if (pub_pcm || !topic_name.empty())
               create_pcm_topic(stream_handle_by_create, topic_name, true);

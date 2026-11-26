@@ -6,9 +6,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "qrb_audio_common_lib/core/audio_capture_backend.hpp"
+#include "qrb_audio_common_lib/core/capture_timestamp.hpp"
 
 namespace qrb
 {
@@ -25,11 +27,13 @@ namespace core
 // boards is pipewire-pulse (PipeWire's Pulse-protocol compatibility layer),
 // not a native PulseAudio daemon - see audio_requirements.md's investigation.
 //
-// This class is additive: AudioManager does not use it yet. It exists so the
-// IAudioCaptureBackend abstraction can be verified against real hardware
-// before AudioManager is switched over to it (kept as a separate change to
-// avoid regressing the capture path qrb_ros_audio_service already depends
-// on).
+// AudioManager routes its streaming-capture path (record without a
+// destination file) through this class since 7896f31.
+//
+// Timestamps (config.need_timestamp): AudioFrame::timestamp_usec is the
+// CLOCK_MONOTONIC capture time of the frame's first sample, produced by
+// CaptureTimestamper from the chunk arrival time and the server-reported
+// record latency. 0 when need_timestamp is false.
 class PipeWirePulseBackend : public IAudioCaptureBackend
 {
 public:
@@ -54,6 +58,10 @@ private:
   uint32_t stream_handle_ = 0;
   std::atomic<AudioBackendStatus> status_{ AudioBackendStatus::kUnconnected };
   uint64_t sequence_ = 0;
+  // Only touched on the PulseAudio mainloop thread (data callback) after
+  // start(); recreated by start() so each run gets a fresh timeline.
+  std::unique_ptr<CaptureTimestamper> timestamper_;
+  bool ts_debug_ = false;
 };
 
 }  // namespace core

@@ -19,7 +19,8 @@ RecordStream::RecordStream(uint32_t stream_handle,
     std::string coding_format,
     std::string source,
     bool pub_pcm,
-    std::string pub_name)
+    std::string pub_name,
+    bool need_timestamp)
   : Stream(stream_handle, sample_rate, channels, sample_format, coding_format)
 {
   AM_LOGD(LOG_TAG, "stream handle 0x" << (std::ostringstream() << std::hex << stream_handle).str()
@@ -27,12 +28,14 @@ RecordStream::RecordStream(uint32_t stream_handle,
                                       << ", channels " << static_cast<int>(channels)
                                       << ", sample_format " << static_cast<int>(sample_format)
                                       << ", coding_format " << coding_format << ", pub_pcm "
-                                      << pub_pcm << ", pub_name " << pub_name);
+                                      << pub_pcm << ", pub_name " << pub_name
+                                      << ", need_timestamp " << need_timestamp);
 
   stream_configs_.type = StreamType::RECORD;
   stream_configs_.source = source;
   stream_configs_.pub_pcm = pub_pcm;
   stream_configs_.pub_name = pub_name;
+  stream_configs_.need_timestamp = need_timestamp;
 
   stream_configs_.state = StreamState::INIT;
 }

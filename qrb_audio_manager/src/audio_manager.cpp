@@ -95,6 +95,7 @@ static qrb::audio_common_lib::core::AudioStreamConfig make_capture_config(
   config.frame_duration_ms = backend_defaults.capture_fragment_duration_ms
                                  ? backend_defaults.capture_fragment_duration_ms
                                  : 20;
+  config.need_timestamp = configs->need_timestamp;
   return config;
 }
 
@@ -153,8 +154,12 @@ static bool audio_common_stream_cb(const void * const payload,
           auto & backend = it->second;
           lock.unlock();  // start()'s callback may itself want the lock via a later STOP/CLOSE
           core::Result result = backend->start([am_handle](const core::AudioFrame & frame) {
-            if (g_stream_data_cb)
-              g_stream_data_cb(am_handle, frame.data, frame.timestamp_usec);
+            if (g_stream_data_cb) {
+              StreamDataInfo info;
+              info.read_duration_usec = frame.read_duration_usec;
+              info.capture_time_mono_usec = frame.timestamp_usec;
+              g_stream_data_cb(am_handle, frame.data, info);
+            }
           });
           if (!result.ok())
             AM_LOGE(LOG_TAG, "capture backend start failed: " << result.message);
@@ -209,6 +214,13 @@ static bool audio_common_stream_cb(const void * const payload,
           g_last_open_error = result;
           return false;
         }
+        // The legacy path never produces capture timestamps (its StreamData
+        // carries only the read duration). Accept the request so existing
+        // callers keep working, but say so instead of silently publishing
+        // zero stamps.
+        if (configs->need_timestamp)
+          AM_LOGI(LOG_TAG, "need_timestamp is not supported for record-to-file streams "
+                           "(source set); published AudioData.timestamp will be zero");
         info.type = qrb::audio_common_lib::StreamType::Capture;
         info.file_path = configs->source;
         info.device = backend_defaults.capture_device;
@@ -237,7 +249,9 @@ static bool audio_common_stream_cb(const void * const payload,
             break;
           case StreamEvent::StreamData:
             if (g_stream_data_cb) {
-              g_stream_data_cb(am_handle, data.data_buf, data.usec);
+              StreamDataInfo info;
+              info.read_duration_usec = data.usec;  // legacy path: no capture timestamp
+              g_stream_data_cb(am_handle, data.data_buf, info);
             }
             return;
           default:
@@ -357,7 +371,8 @@ uint32_t AudioManager::create_record_stream(uint32_t sample_rate,
     std::string coding_format,
     std::string source,
     bool pub_pcm,
-    std::string pub_name)
+    std::string pub_name,
+    bool need_timestamp)
 {
   auto stream_handle = generate_key();
   while (streams_.find(stream_handle) != streams_.end()) {
@@ -365,7 +380,7 @@ uint32_t AudioManager::create_record_stream(uint32_t sample_rate,
   }
 
   std::shared_ptr<Stream> stream_ptr = std::make_shared<RecordStream>(stream_handle, sample_rate,
-      channels, sample_format, coding_format, source, pub_pcm, pub_name);
+      channels, sample_format, coding_format, source, pub_pcm, pub_name, need_timestamp);
 
   if (!stream_ptr->open()) {
     stream_ptr = nullptr;

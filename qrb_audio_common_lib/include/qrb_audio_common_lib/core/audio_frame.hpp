@@ -46,7 +46,17 @@ struct AudioFrame
 
   uint32_t frame_count = 0;  // samples per channel in this frame
   uint64_t sequence = 0;     // monotonically increasing per stream, starting at 0
+  // Capture time of the FIRST sample frame in `data`, CLOCK_MONOTONIC
+  // microseconds (see core/capture_timestamp.hpp). 0 = no valid timestamp:
+  // AudioStreamConfig::need_timestamp was false, or the backend could not
+  // produce one. Before 2026-11-26 PipeWirePulseBackend stored the chunk READ
+  // DURATION here (a few us), which was never a timestamp; that value now
+  // lives in read_duration_usec.
   uint64_t timestamp_usec = 0;
+
+  // How long the backend took to read/copy this chunk, microseconds. Only a
+  // diagnostic (feeds AudioServer's enable_latency_log), not a time point.
+  uint64_t read_duration_usec = 0;
 
   uint32_t flags = static_cast<uint32_t>(FrameFlag::kNone);
 

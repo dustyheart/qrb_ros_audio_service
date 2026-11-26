@@ -4,11 +4,13 @@
 #include "qrb_audio_common_lib/core/pipewire_pulse_backend.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cerrno>
 #include <string>
 #include <vector>
 
 #include "qrb_audio_common_lib/audio_common_wrapper.hpp"
+#include "qrb_audio_common_lib/audio_log.hpp"
 #include "qrb_audio_common_lib/core/config_validation.hpp"
 
 namespace qrb
@@ -99,6 +101,9 @@ Result PipeWirePulseBackend::configure(const AudioStreamConfig & config)
   info.device = config.device;
   info.fragment_duration_ms = config.fragment_duration_ms;
   info.need_timestamp = config.need_timestamp;
+  LOGI("configure: device='%s' rate=%u channels=%u format=%u fragment_ms=%u need_timestamp=%d",
+      config.device.c_str(), config.sample_rate, config.channels, config.sample_format,
+      config.fragment_duration_ms, config.need_timestamp ? 1 : 0);
   info.pcm_mode = true;
   info.volume = kCaptureVolume;
 
@@ -118,7 +123,20 @@ Result PipeWirePulseBackend::configure(const AudioStreamConfig & config)
         uint32_t frame_bytes = config_.channels * bytes_per_sample;
         frame.frame_count = frame_bytes ? static_cast<uint32_t>(frame.byte_size() / frame_bytes) : 0;
         frame.sequence = sequence_++;
-        frame.timestamp_usec = data.usec;
+        frame.read_duration_usec = data.usec;  // a duration; see AudioFrame
+        if (timestamper_) {
+          auto ts = timestamper_->on_chunk(frame.frame_count, data.arrival_mono_usec, data.latency_usec);
+          frame.timestamp_usec = ts.timestamp_usec;
+          if (ts_debug_) {
+            LOGI("tsdbg seq=%llu frames=%u arrival=%llu latency=%lld ts=%llu resync=%d",
+                static_cast<unsigned long long>(frame.sequence), frame.frame_count,
+                static_cast<unsigned long long>(data.arrival_mono_usec),
+                static_cast<long long>(data.latency_usec),
+                static_cast<unsigned long long>(ts.timestamp_usec), ts.resynced ? 1 : 0);
+          }
+          if (ts.gap_detected)
+            frame.flags |= static_cast<uint32_t>(FrameFlag::kDropped);
+        }
         callback_(frame);
         return;
       }
@@ -155,6 +173,12 @@ Result PipeWirePulseBackend::start(FrameCallback callback)
 
   callback_ = std::move(callback);
   sequence_ = 0;
+  // Set before audio_stream_start(): the data callback may fire as soon as
+  // the stream connects.
+  ts_debug_ = getenv("QRB_AUDIO_TS_DEBUG") != nullptr;  // per-chunk diagnostics, off by default
+  timestamper_ = config_.need_timestamp
+                     ? std::make_unique<CaptureTimestamper>(config_.sample_rate)
+                     : nullptr;
 
   int ret = audio_stream_start(stream_handle_);
   if (ret != 0) {
@@ -174,6 +198,12 @@ Result PipeWirePulseBackend::stop()
 
   if (status_ == AudioBackendStatus::kReady) {
     audio_stream_stop(stream_handle_);
+  }
+  if (timestamper_) {
+    LOGI("capture timestamps: %llu discontinuity resync(s); measured audio clock / "
+         "CLOCK_MONOTONIC ratio %.5f",
+        static_cast<unsigned long long>(timestamper_->resync_count()),
+        timestamper_->clock_ratio() > 0 ? 1.0 / timestamper_->clock_ratio() : 0.0);
   }
   audio_stream_close(stream_handle_);
   stream_handle_ = 0;

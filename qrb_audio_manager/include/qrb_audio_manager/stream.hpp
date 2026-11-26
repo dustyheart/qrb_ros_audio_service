@@ -68,6 +68,7 @@ struct StreamConfigs
   bool mute{false};
   bool pub_pcm{false};
   std::string pub_name;
+  bool need_timestamp{false};
   std::string subs_name;
 };
 
@@ -124,7 +125,8 @@ public:
       std::string coding_format,
       std::string source,
       bool pub_pcm,
-      std::string pub_name);
+      std::string pub_name,
+      bool need_timestamp = false);
 };
 
 class PlaybackStream : public Stream

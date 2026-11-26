@@ -66,6 +66,7 @@ protected:
 public:
   std::shared_ptr<pa_sample_spec> sample_spec;
   float stream_volume = 100;
+  bool need_timestamp = false;
   pa_usec_t start_usec = 0;
 
   std::string file_path;

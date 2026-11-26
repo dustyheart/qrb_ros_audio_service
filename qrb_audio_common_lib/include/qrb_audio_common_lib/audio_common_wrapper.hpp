@@ -35,7 +35,14 @@ enum class StreamEvent
 struct StreamEventData
 {
   std::shared_ptr<std::vector<uint8_t>> data_buf;
+  // StreamData: how long reading/copying this chunk took (a duration, NOT a
+  // time point). StreamTimestamp: stream time from pa_stream_get_time().
   uint64_t usec = 0;
+  // StreamData with need_timestamp only (else 0 / -1): CLOCK_MONOTONIC time
+  // the chunk was picked up, and the server-reported record latency at that
+  // moment (age of the chunk's first sample), -1 if unavailable.
+  uint64_t arrival_mono_usec = 0;
+  int64_t latency_usec = -1;
 };
 
 struct AudioStreamInfo

@@ -98,8 +98,37 @@ void PulseCommonStream::pulse_context_time_event_callback(pa_mainloop_api * m,
   pa_context_rttime_restart(pulse_context_, e, pa_rtclock_now() + TIME_EVENT_USEC);
 }
 
+// timestamp_streams_ is iterated by pulse_context_time_event_callback on the
+// mainloop thread, and pa_context_rttime_new()/time_free() are PA API calls:
+// both must happen under the threaded-mainloop lock when called from another
+// thread (the ROS service thread, in practice). The original code did
+// neither; harmless only because need_timestamp was never set to true by any
+// caller before 2026-11-26.
+namespace
+{
+class MainloopLock
+{
+public:
+  explicit MainloopLock(pa_threaded_mainloop * m)
+    : m_(m && !pa_threaded_mainloop_in_thread(m) ? m : nullptr)
+  {
+    if (m_)
+      pa_threaded_mainloop_lock(m_);
+  }
+  ~MainloopLock()
+  {
+    if (m_)
+      pa_threaded_mainloop_unlock(m_);
+  }
+
+private:
+  pa_threaded_mainloop * m_;
+};
+}  // namespace
+
 int PulseCommonStream::register_stream_timestamp_event(PulseCommonStream * stream_handle)
 {
+  MainloopLock lock(pulse_mainloop_);
   timestamp_streams_.insert(stream_handle);
 
   if (pulse_context_time_event_ == nullptr) {
@@ -118,6 +147,7 @@ int PulseCommonStream::register_stream_timestamp_event(PulseCommonStream * strea
 
 void PulseCommonStream::deregister_stream_timestamp_event(PulseCommonStream * stream_handle)
 {
+  MainloopLock lock(pulse_mainloop_);
   timestamp_streams_.erase(stream_handle);
 
   if ((timestamp_streams_.size() == 0) && pulse_context_time_event_) {
@@ -457,6 +487,7 @@ uint32_t PulseCommonStream::audio_stream_open(const AudioStreamInfo & stream_inf
   stream->event_cb = event_callback;
   stream->pcm_mode = stream_info.pcm_mode;
 
+  stream->need_timestamp = stream_info.need_timestamp;
   if (stream_info.need_timestamp)
     register_stream_timestamp_event(stream);
 
@@ -935,6 +966,23 @@ void CaptureStream::stream_data_callback(pa_stream * stream, size_t length, void
     const void * data;
     std::chrono::steady_clock::time_point read_start = std::chrono::steady_clock::now();
 
+    // Capture-time inputs for CaptureTimestamper, sampled BEFORE
+    // pa_stream_drop(): at this point the chunk is still counted in the
+    // stream's buffered data, so the record latency equals the age of the
+    // chunk's first sample. Only when the caller asked for timestamps, so the
+    // default path does no extra work.
+    uint64_t arrival_mono_usec = 0;
+    int64_t latency_usec = -1;
+    if (current_stream->need_timestamp) {
+      arrival_mono_usec = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(read_start.time_since_epoch())
+              .count());
+      pa_usec_t lat = 0;
+      int negative = 0;
+      if (pa_stream_get_latency(stream, &lat, &negative) == 0)
+        latency_usec = negative ? 0 : static_cast<int64_t>(lat);
+    }
+
     if (pa_stream_peek(stream, &data, &length) < 0) {
       LOGE("pa_stream_peek() failed(%s)",
           pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
@@ -957,6 +1005,8 @@ void CaptureStream::stream_data_callback(pa_stream * stream, size_t length, void
           std::chrono::steady_clock::now() - read_start)
                            .count();
       s_event_data.usec = static_cast<uint64_t>(read_usec);
+      s_event_data.arrival_mono_usec = arrival_mono_usec;
+      s_event_data.latency_usec = latency_usec;
 
       current_stream->event_cb(StreamEvent::StreamData, s_event_data, (void *)stream_handle);
       bytes = length;

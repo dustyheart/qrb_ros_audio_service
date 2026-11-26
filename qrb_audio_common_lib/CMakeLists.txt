@@ -63,6 +63,10 @@ if(BUILD_TESTING)
   target_include_directories(core_config_validation_test PRIVATE include)
   add_test(NAME core_config_validation_test COMMAND core_config_validation_test)
 
+  add_executable(core_capture_timestamp_test test/core_capture_timestamp_test.cpp)
+  target_include_directories(core_capture_timestamp_test PRIVATE include)
+  add_test(NAME core_capture_timestamp_test COMMAND core_capture_timestamp_test)
+
   # Hardware-dependent; not registered with CTest, built for manual use only.
   add_executable(manual_pipewire_backend_capture test/manual_pipewire_backend_capture.cpp)
   target_include_directories(manual_pipewire_backend_capture PRIVATE include)
