@@ -27,12 +27,18 @@ struct ProcessorStats
   uint64_t bypassed_count = 0;
   uint64_t failed_count = 0;
   uint64_t consecutive_failures = 0;
+  // Wall time spent inside this stage's process(), microseconds. Measured
+  // around every call that actually ran (not for kFailed/kDegraded skips).
+  uint64_t total_process_usec = 0;
+  uint64_t max_process_usec = 0;
+  // configure() failure reason ("[code] message"), empty when healthy.
+  std::string init_error;
 };
 
 // Runs a fixed, ordered list of IAudioProcessor stages over each AudioFrame.
-// Not thread-safe by design: it is meant to be driven from a single
-// capture/render callback thread (see IAudioProcessor's threading note), so
-// it does not take any internal locks.
+// Not thread-safe by design: it is driven from exactly one thread (for
+// capture, ProcessingCaptureBackend's worker thread), so it does not take any
+// internal locks.
 //
 // Failure policy (refactoring_plan.md section 6.4):
 //  - A processor whose configure() fails is marked kFailed and skipped for
@@ -53,11 +59,10 @@ public:
   // duplicates are rejected by add_processor() returning false.
   bool add_processor(std::unique_ptr<IAudioProcessor> processor, const ProcessorConfig & config);
 
-  // Runs every non-kFailed stage over `frame` in insertion order. Returns the
-  // Result of the first *stage* whose process() call reports kFailed through
-  // Result::ok()==false being surfaced here only once the consecutive-failure
-  // threshold is crossed (see class doc) - a single transient failure does not
-  // fail this call, matching "VAD 失败不得阻断 PCM 输出" / NS/AEC bypass rules.
+  // Runs every non-kFailed stage over `frame` in insertion order. Never
+  // fails as a whole: a failing stage is counted and, past the threshold,
+  // degraded (see class doc), so a processor failure can never block PCM
+  // output (refactoring_plan.md section 6.4).
   void process(AudioFrame & frame, const ProcessingContext & context);
 
   void reset_all();

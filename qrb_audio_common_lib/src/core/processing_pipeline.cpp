@@ -3,6 +3,8 @@
 
 #include "qrb_audio_common_lib/core/processing_pipeline.hpp"
 
+#include <chrono>
+
 namespace qrb
 {
 namespace audio_common_lib
@@ -28,6 +30,7 @@ bool ProcessingPipeline::add_processor(std::unique_ptr<IAudioProcessor> processo
   Result configure_result = processor->configure(config);
   if (!configure_result.ok()) {
     stats.health = ProcessorHealth::kFailed;
+    stats.init_error = configure_result.to_log_string();
   }
 
   processors_.push_back(Entry{std::move(processor)});
@@ -50,7 +53,14 @@ void ProcessingPipeline::process(AudioFrame & frame, const ProcessingContext & c
       continue;
     }
 
+    const auto t0 = std::chrono::steady_clock::now();
     ProcessResult result = processors_[i].processor->process(frame, context);
+    const uint64_t usec = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
+            .count());
+    stats.total_process_usec += usec;
+    if (usec > stats.max_process_usec)
+      stats.max_process_usec = usec;
     switch (result.status) {
       case ProcessResultStatus::kProcessed:
         stats.processed_count++;

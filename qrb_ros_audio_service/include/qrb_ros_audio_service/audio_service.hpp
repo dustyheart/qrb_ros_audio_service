@@ -46,7 +46,10 @@ private:
   rclcpp::CallbackGroup::SharedPtr callback_group_{nullptr};
   rclcpp::Service<AudioService>::SharedPtr server_{nullptr};
 
+  // Read on the capture worker thread (on_stream_data), modified on service
+  // threads (create/release of any stream), hence the mutex.
   std::unordered_map<uint32_t, rclcpp::Publisher<AudioData>::SharedPtr> capture_pubs_;
+  std::mutex capture_pubs_mutex_;
   std::unordered_map<uint32_t, rclcpp::Subscription<AudioData>::SharedPtr> playback_subs_;
 
   std::unordered_map<uint32_t, LatencyStats> capture_latency_stats_;
@@ -58,7 +61,7 @@ private:
 
   // Per capture stream: (monotonic ns, ROS clock ns) sampled back-to-back
   // when the stream delivered its first timestamped chunk. Written/read on
-  // the PulseAudio mainloop thread (on_stream_data), erased on the service
+  // the capture worker thread (on_stream_data), erased on the service
   // thread (release), hence the mutex.
   struct ClockBase
   {
@@ -72,6 +75,9 @@ private:
       const std::shared_ptr<AudioService::Request> request,
       std::shared_ptr<AudioService::Response> response);
   void shutdown_callback();
+  static qrb::audio_common_lib::core::Result parse_processor_specs(
+      const std::vector<std::string> & specs,
+      std::vector<qrb::audio_common_lib::core::ProcessorSlot> & out);
   void on_stream_data(uint32_t am_handle,
       std::shared_ptr<std::vector<uint8_t>> data_buf,
       const qrb::audio_manager::StreamDataInfo & info);

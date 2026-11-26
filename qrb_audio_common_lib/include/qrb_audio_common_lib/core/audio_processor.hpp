@@ -49,14 +49,14 @@ struct ProcessingContext
 };
 
 // A single stage in a ProcessingPipeline (NS, VAD, AEC, or a test double).
-// Implementations MUST be real-time safe in process(): no blocking I/O, no
-// locking against anything the audio capture thread might also need, and
-// ideally no dynamic allocation on the steady-state path. See
-// refactoring_plan.md section 3.1 (ROS interface layer threading) and 6.4
-// (processor failure policy) for the constraints this interface exists to
-// satisfy. process() runs on the capture/render callback thread (same thread
-// as the PulseAudio stream callbacks), per the current threading decision -
-// revisit this doc if that changes.
+// For capture, process() runs on ProcessingCaptureBackend's worker thread,
+// not on the PulseAudio mainloop, and always gets exactly
+// ProcessingContext::frame_duration_ms of audio (10 ms in production; see
+// ChunkReframer). The block buffer is exclusively owned for the duration of
+// the call, so it may be modified in place. process() should still be
+// prompt and allocation-free in steady state: the worker has a bounded
+// queue, and a processor slower than real time makes it drop whole chunks.
+// Failure policy: refactoring_plan.md section 6.4 / ProcessingPipeline.
 class IAudioProcessor
 {
 public:

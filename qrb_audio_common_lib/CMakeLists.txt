@@ -6,6 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 
 pkg_check_modules(ALSA REQUIRED alsa)
 pkg_check_modules(SNDFILE REQUIRED sndfile)
@@ -17,6 +18,8 @@ add_library(${PROJECT_NAME} SHARED
   src/audio_common_wrapper.cpp
   src/core/processing_pipeline.cpp
   src/core/pipewire_pulse_backend.cpp
+  src/core/processing_capture_backend.cpp
+  src/core/processor_factory.cpp
 )
 
 target_include_directories(${PROJECT_NAME}
@@ -30,6 +33,7 @@ target_link_libraries(${PROJECT_NAME}
     ${ALSA_LIBRARIES}
     ${SNDFILE_LIBRARIES}
     pulse
+    Threads::Threads
 )
 
 set_target_properties(${PROJECT_NAME}
@@ -66,6 +70,15 @@ if(BUILD_TESTING)
   add_executable(core_capture_timestamp_test test/core_capture_timestamp_test.cpp)
   target_include_directories(core_capture_timestamp_test PRIVATE include)
   add_test(NAME core_capture_timestamp_test COMMAND core_capture_timestamp_test)
+
+  add_executable(core_chunk_reframer_test test/core_chunk_reframer_test.cpp)
+  target_include_directories(core_chunk_reframer_test PRIVATE include)
+  add_test(NAME core_chunk_reframer_test COMMAND core_chunk_reframer_test)
+
+  add_executable(core_processing_backend_test test/core_processing_backend_test.cpp)
+  target_include_directories(core_processing_backend_test PRIVATE include)
+  target_link_libraries(core_processing_backend_test ${PROJECT_NAME})
+  add_test(NAME core_processing_backend_test COMMAND core_processing_backend_test)
 
   # Hardware-dependent; not registered with CTest, built for manual use only.
   add_executable(manual_pipewire_backend_capture test/manual_pipewire_backend_capture.cpp)

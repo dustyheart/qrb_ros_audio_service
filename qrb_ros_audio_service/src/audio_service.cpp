@@ -6,9 +6,13 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "qrb_ros_audio_service/audio_service.hpp"
 #include "qrb_audio_common_lib/core/capture_timestamp.hpp"
+#include "qrb_audio_common_lib/core/processor_factory.hpp"
 #include "qrb_audio_manager/audio_manager.hpp"
 // clang-format on
 
@@ -58,6 +62,18 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
                      param.get_name() == "playback_device" ||
                      param.get_name() == "capture_fragment_duration_ms" ||
                      param.get_name() == "playback_buffer_duration_ms") {
+            backend_param_changed = true;
+          } else if (param.get_name() == "capture_processors") {
+            std::vector<qrb::audio_common_lib::core::ProcessorSlot> slots;
+            auto parsed = parse_processor_specs(param.as_string_array(), slots);
+            if (!parsed.ok()) {
+              // Reject instead of applying a partial chain.
+              result.successful = false;
+              result.reason = parsed.to_log_string();
+              RCLCPP_ERROR(
+                  this->get_logger(), "capture_processors rejected: %s", result.reason.c_str());
+              return result;
+            }
             backend_param_changed = true;
           }
         }
@@ -140,9 +156,14 @@ void AudioServer::on_stream_data(uint32_t am_handle,
   uint64_t usec = info.read_duration_usec;
   bool log_enabled = latency_log_enabled_.load();
 
-  auto it = capture_pubs_.find(am_handle);
-  if (it == capture_pubs_.end())
-    return;
+  rclcpp::Publisher<AudioData>::SharedPtr pub;
+  {
+    std::lock_guard<std::mutex> lock(capture_pubs_mutex_);
+    auto it = capture_pubs_.find(am_handle);
+    if (it == capture_pubs_.end())
+      return;
+    pub = it->second;
+  }
 
   std::chrono::steady_clock::time_point publish_start;
   if (log_enabled)
@@ -153,7 +174,7 @@ void AudioServer::on_stream_data(uint32_t am_handle,
   msg.timestamp = to_ros_stamp(am_handle, info.capture_time_mono_usec);
   if (data_buf)
     msg.data = std::move(*data_buf);
-  it->second->publish(msg);
+  pub->publish(msg);
 
   if (log_enabled) {
     auto t2 = std::chrono::steady_clock::now();
@@ -229,7 +250,9 @@ void AudioServer::create_pcm_topic(uint32_t stream_handle,
   if (is_capture) {
     rclcpp::PublisherOptions pub_options;
     pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
-    capture_pubs_[stream_handle] = this->create_publisher<AudioData>(topic_name, 10, pub_options);
+    auto pub = this->create_publisher<AudioData>(topic_name, 10, pub_options);
+    std::lock_guard<std::mutex> lock(capture_pubs_mutex_);
+    capture_pubs_[stream_handle] = pub;
   } else {
     rclcpp::SubscriptionOptions sub_options;
     sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
@@ -244,7 +267,10 @@ void AudioServer::create_pcm_topic(uint32_t stream_handle,
 
 void AudioServer::delete_pcm_topic(uint32_t stream_handle)
 {
-  capture_pubs_.erase(stream_handle);
+  {
+    std::lock_guard<std::mutex> lock(capture_pubs_mutex_);
+    capture_pubs_.erase(stream_handle);
+  }
   playback_subs_.erase(stream_handle);
   std::lock_guard<std::mutex> lock(stamp_bases_mutex_);
   stamp_bases_.erase(stream_handle);
@@ -398,6 +424,36 @@ void AudioServer::declare_backend_parameters()
   this->declare_parameter<std::string>("playback_device", "", device_desc);
   this->declare_parameter<int>("capture_fragment_duration_ms", 0, capture_fragment_desc);
   this->declare_parameter<int>("playback_buffer_duration_ms", 0, playback_buffer_desc);
+
+  rcl_interfaces::msg::ParameterDescriptor processors_desc;
+  processors_desc.description =
+      "Processing chain for streaming capture (pub_pcm) streams, in order. Each entry is "
+      "\"name\" or \"name:key=value,key=value\". Empty means no processing. Applies to "
+      "streams created afterwards. Known names: passthrough, test_delay (test only).";
+  this->declare_parameter<std::vector<std::string>>(
+      "capture_processors", std::vector<std::string>{}, processors_desc);
+}
+
+qrb::audio_common_lib::core::Result AudioServer::parse_processor_specs(
+    const std::vector<std::string> & specs,
+    std::vector<qrb::audio_common_lib::core::ProcessorSlot> & out)
+{
+  out.clear();
+  for (const auto & spec : specs) {
+    qrb::audio_common_lib::core::ProcessorSlot slot;
+    auto r = qrb::audio_common_lib::core::parse_processor_spec(spec, slot);
+    if (!r.ok())
+      return r;
+    for (const auto & existing : out) {
+      if (existing.name == slot.name) {
+        return qrb::audio_common_lib::core::Result::Error(
+            qrb::audio_common_lib::core::ErrorCode::kInvalidConfig,
+            "processor '" + slot.name + "' listed twice");
+      }
+    }
+    out.push_back(slot);
+  }
+  return qrb::audio_common_lib::core::Result::Ok();
 }
 
 namespace
@@ -416,6 +472,19 @@ std::string pending_or_current_string(rclcpp::Node * node,
     }
   }
   return node->get_parameter(name).as_string();
+}
+
+std::vector<std::string> pending_or_current_string_array(rclcpp::Node * node,
+    const std::vector<rclcpp::Parameter> * pending,
+    const std::string & name)
+{
+  if (pending) {
+    for (const auto & param : *pending) {
+      if (param.get_name() == name)
+        return param.as_string_array();
+    }
+  }
+  return node->get_parameter(name).as_string_array();
 }
 
 int64_t pending_or_current_int(rclcpp::Node * node,
@@ -441,6 +510,15 @@ void AudioServer::apply_backend_parameters(const std::vector<rclcpp::Parameter> 
       static_cast<uint32_t>(pending_or_current_int(this, pending, "capture_fragment_duration_ms"));
   defaults.playback_buffer_duration_ms =
       static_cast<uint32_t>(pending_or_current_int(this, pending, "playback_buffer_duration_ms"));
+
+  // Already validated by the set-parameters callback; at startup an invalid
+  // value from a launch file/CLI fails node construction rather than
+  // silently running without the requested processing.
+  auto parsed =
+      parse_processor_specs(pending_or_current_string_array(this, pending, "capture_processors"),
+          defaults.capture_processors);
+  if (!parsed.ok())
+    throw std::invalid_argument("capture_processors: " + parsed.to_log_string());
 
   AudioManager::set_backend_defaults(defaults);
 }

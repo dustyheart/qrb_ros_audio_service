@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "qrb_audio_common_lib/core/audio_stream_config.hpp"
 #include "qrb_audio_manager/message_queue.hpp"
 #include "qrb_audio_manager/stream.hpp"
 
@@ -95,6 +96,9 @@ struct AudioBackendDefaults
   std::string playback_device;
   uint32_t capture_fragment_duration_ms = 0;
   uint32_t playback_buffer_duration_ms = 0;
+  // Processing chain for streaming capture (pub_pcm) streams, in order.
+  // Empty = no processing. Record-to-file and playback ignore it.
+  std::vector<qrb::audio_common_lib::core::ProcessorSlot> capture_processors;
 };
 
 class AudioManager : public IAudioManager
@@ -126,7 +130,9 @@ public:
   const std::map<std::string, std::string> & get_buildin_sounds() override;
   static void set_stream_data_callback(stream_data_cb_t cb);
   static void set_backend_defaults(const AudioBackendDefaults & defaults);
-  static const AudioBackendDefaults & get_backend_defaults();
+  // By value: set_backend_defaults() runs on the parameter callback thread
+  // while streams are being created on (reentrant) service threads.
+  static AudioBackendDefaults get_backend_defaults();
   static void on_task_completed(int domain,
       uint32_t stream_handle,
       uint32_t audio_domain_handle,

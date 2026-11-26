@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <sys/types.h>
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -17,6 +18,8 @@
 #include "qrb_audio_common_lib/audio_common_wrapper.hpp"
 #include "qrb_audio_common_lib/core/config_validation.hpp"
 #include "qrb_audio_common_lib/core/pipewire_pulse_backend.hpp"
+#include "qrb_audio_common_lib/core/processing_capture_backend.hpp"
+#include "qrb_audio_common_lib/core/processor_factory.hpp"
 #include "qrb_audio_manager/audio_manager.hpp"
 #include "qrb_audio_manager/stream.hpp"
 // clang-format on
@@ -50,6 +53,7 @@ std::map<std::string, AudioManagerPlayMode> audio_manager_play_mode {
 AudioManager * AudioManager::instance_ = nullptr;
 stream_data_cb_t AudioManager::stream_data_cb_ = nullptr;
 AudioBackendDefaults AudioManager::backend_defaults_{};
+static std::mutex g_backend_defaults_mutex;
 
 static stream_data_cb_t g_stream_data_cb = nullptr;
 
@@ -71,8 +75,10 @@ static stream_data_cb_t g_stream_data_cb = nullptr;
 // AudioManager::generate_key() already uses for am_handle), so collision risk
 // is the same order as the rest of this codebase already accepts.
 static std::mutex g_capture_backends_mutex;
+// shared_ptr so START can keep the backend alive after dropping the registry
+// lock (a concurrent CLOSE on another reentrant service thread may erase it).
 static std::unordered_map<uint32_t,
-    std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend>>
+    std::shared_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend>>
     g_capture_backends;
 
 // Why the last OPEN failed, for create_record_stream()'s exception text.
@@ -93,7 +99,12 @@ static qrb::audio_common_lib::core::AudioStreamConfig make_capture_config(
   config.channels = configs->channels;
   config.sample_format = configs->sample_format;
   config.fragment_duration_ms = backend_defaults.capture_fragment_duration_ms;
-  config.frame_duration_ms = backend_defaults.capture_fragment_duration_ms ?
+  config.processors = backend_defaults.capture_processors;
+  // With processors: 10 ms blocks, the only size WebRTC APM accepts.
+  // Without: frame_duration_ms is only validated, never used for framing.
+  config.frame_duration_ms = !config.processors.empty() ?
+                                 10 :
+                             backend_defaults.capture_fragment_duration_ms ?
                                  backend_defaults.capture_fragment_duration_ms :
                                  20;
   config.need_timestamp = configs->need_timestamp;
@@ -101,7 +112,7 @@ static qrb::audio_common_lib::core::AudioStreamConfig make_capture_config(
 }
 
 static uint32_t register_capture_backend(
-    std::unique_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend> backend)
+    std::shared_ptr<qrb::audio_common_lib::core::IAudioCaptureBackend> backend)
 {
   std::random_device rd;
   std::mt19937 gen(rd());
@@ -130,8 +141,25 @@ static bool audio_common_stream_cb(const void * const payload,
     g_last_open_error = core::Result::Ok();
 
   if (cmd == StreamCommand::OPEN && use_new_capture_backend) {
-    auto backend = std::make_unique<core::PipeWirePulseBackend>();
-    core::Result result = backend->configure(make_capture_config(configs));
+    // Every streaming capture goes through ProcessingCaptureBackend, even
+    // with no processors: it moves delivery (ROS publish) off the
+    // PulseAudio mainloop thread onto its own worker.
+    const core::AudioStreamConfig config = make_capture_config(configs);
+    std::unique_ptr<core::ProcessingPipeline> pipeline;
+    core::Result result = core::build_pipeline(config.processors, pipeline);
+    if (!result.ok()) {
+      AM_LOGE(LOG_TAG, "capture processing pipeline: " << result.to_log_string());
+      g_last_open_error = result;
+      return false;
+    }
+    // Queue ~2 s of audio (min 8 chunks, PipeWire delivers in bursts): long
+    // enough to ride out a stall, short enough that a too-slow processor
+    // starts dropping instead of building seconds of latency.
+    const uint32_t chunk_ms = config.fragment_duration_ms ? config.fragment_duration_ms : 80;
+    const size_t queue_chunks = std::max<size_t>(8, (2000 + chunk_ms - 1) / chunk_ms);
+    auto backend = std::make_shared<core::ProcessingCaptureBackend>(
+        std::make_unique<core::PipeWirePulseBackend>(), std::move(pipeline), queue_chunks);
+    result = backend->configure(config);
     if (!result.ok()) {
       AM_LOGE(LOG_TAG, "capture backend configure failed: " << result.to_log_string());
       g_last_open_error = result;
@@ -151,8 +179,8 @@ static bool audio_common_stream_cb(const void * const payload,
     if (it != g_capture_backends.end()) {
       switch (cmd) {
         case StreamCommand::START: {
-          auto & backend = it->second;
-          lock.unlock();  // start()'s callback may itself want the lock via a later STOP/CLOSE
+          std::shared_ptr<core::IAudioCaptureBackend> backend = it->second;
+          lock.unlock();  // a concurrent STOP/CLOSE must not wait for start()
           core::Result result = backend->start([am_handle](const core::AudioFrame & frame) {
             if (g_stream_data_cb) {
               StreamDataInfo info;
@@ -296,16 +324,27 @@ void AudioManager::set_stream_data_callback(stream_data_cb_t cb)
 
 void AudioManager::set_backend_defaults(const AudioBackendDefaults & defaults)
 {
-  backend_defaults_ = defaults;
+  {
+    std::lock_guard<std::mutex> lock(g_backend_defaults_mutex);
+    backend_defaults_ = defaults;
+  }
+  std::string processors;
+  for (const auto & slot : defaults.capture_processors) {
+    processors += (processors.empty() ? "" : ", ") + slot.name;
+    for (const auto & kv : slot.config)
+      processors += " " + kv.first + "=" + kv.second;
+  }
   AM_LOGI(
       LOG_TAG, "backend defaults updated: capture_device='"
                    << defaults.capture_device << "', playback_device='" << defaults.playback_device
                    << "', capture_fragment_duration_ms=" << defaults.capture_fragment_duration_ms
-                   << ", playback_buffer_duration_ms=" << defaults.playback_buffer_duration_ms);
+                   << ", playback_buffer_duration_ms=" << defaults.playback_buffer_duration_ms
+                   << ", capture_processors=[" << processors << "]");
 }
 
-const AudioBackendDefaults & AudioManager::get_backend_defaults()
+AudioBackendDefaults AudioManager::get_backend_defaults()
 {
+  std::lock_guard<std::mutex> lock(g_backend_defaults_mutex);
   return backend_defaults_;
 }
 

@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "qrb_audio_common_lib/core/audio_processor.hpp"
+
 namespace qrb
 {
 namespace audio_common_lib
@@ -15,14 +17,14 @@ namespace audio_common_lib
 namespace core
 {
 
-// Which processors are attached to a stream, and in what order. Names are
-// registry keys (see ProcessorRegistry, introduced alongside the first real
-// processor), not yet backed by per-processor config here - that is added
-// once a concrete processor (NS/VAD/AEC) defines what it needs.
+// Which processors are attached to a stream, and in what order. `name` is a
+// key understood by core::create_processor() (core/processor_factory.hpp);
+// `config` is passed verbatim to that processor's configure().
 struct ProcessorSlot
 {
   std::string name;
   bool bypassed = false;
+  ProcessorConfig config;
 };
 
 // Unified capture/playback configuration, replacing the ad hoc combination of
@@ -38,7 +40,11 @@ struct AudioStreamConfig
   uint8_t channels = 1;
   uint8_t sample_format = 16;  // bit depth
 
-  uint32_t frame_duration_ms = 20;    // processing frame size, independent of backend fragment
+  // Processing block size, independent of the backend fragment. Only used
+  // when `processors` is non-empty: capture chunks are re-framed into blocks
+  // of this length for the processors (WebRTC APM needs exactly 10 ms), then
+  // re-assembled into the original chunk sizes before delivery.
+  uint32_t frame_duration_ms = 20;
   uint32_t fragment_duration_ms = 0;  // 0 = backend default (capture)
   uint32_t buffer_duration_ms = 0;    // 0 = backend default (playback)
 
