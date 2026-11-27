@@ -35,7 +35,14 @@ enum class StreamEvent
 struct StreamEventData
 {
   std::shared_ptr<std::vector<uint8_t>> data_buf;
+  // StreamData: how long reading/copying this chunk took (a duration, NOT a
+  // time point). StreamTimestamp: stream time from pa_stream_get_time().
   uint64_t usec = 0;
+  // StreamData with need_timestamp only (else 0 / -1): CLOCK_MONOTONIC time
+  // the chunk was picked up, and the server-reported record latency at that
+  // moment (age of the chunk's first sample), -1 if unavailable.
+  uint64_t arrival_mono_usec = 0;
+  int64_t latency_usec = -1;
 };
 
 struct AudioStreamInfo
@@ -50,6 +57,10 @@ struct AudioStreamInfo
   bool need_timestamp = false;
   bool pcm_mode = false;
   int32_t repeat = 0;
+  // Capture fragment size, in ms. 0 means "use backend default".
+  uint32_t fragment_duration_ms = 0;
+  // Playback pre-buffer size, in ms. 0 means "use backend default".
+  uint32_t buffer_duration_ms = 0;
 };
 
 using stream_event_callback_func = std::function<void(StreamEvent, StreamEventData, void *)>;
@@ -70,6 +81,17 @@ int audio_stream_mute(uint32_t stream_handle, bool mute);
 int audio_stream_stop(uint32_t stream_handle);
 int audio_stream_close(uint32_t stream_handle);
 int audio_stream_write(uint32_t stream_handle, const void * buf, size_t length);
+
+// Enumerate capture sources (PulseAudio/pipewire-pulse source names, including
+// ".monitor" sources) as accepted by AudioStreamInfo::device. Returns 0 on
+// success, -ENOTSUP when the active backend can't enumerate (ALSA), -EIO when
+// the audio server can't be queried.
+//
+// Needed because pipewire-pulse does NOT reject an unknown source name in
+// pa_stream_connect_record(): the stream still reaches PA_STREAM_READY, it is
+// simply never linked to a device, so capture "succeeds" and delivers no data
+// (verified on real hardware). Existence has to be checked up front.
+int audio_list_capture_devices(std::vector<std::string> & names);
 
 }  // namespace audio_common_lib
 }  // namespace qrb

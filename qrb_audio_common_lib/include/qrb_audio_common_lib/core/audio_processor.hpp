@@ -1,0 +1,134 @@
+// Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: BSD-3-Clause-Clear
+
+#ifndef QRB_AUDIO_COMMON_LIB__CORE__AUDIO_PROCESSOR_HPP_
+#define QRB_AUDIO_COMMON_LIB__CORE__AUDIO_PROCESSOR_HPP_
+
+#include <cstdint>
+#include <map>
+#include <string>
+
+#include "qrb_audio_common_lib/core/audio_frame.hpp"
+#include "qrb_audio_common_lib/core/result.hpp"
+
+namespace qrb
+{
+namespace audio_common_lib
+{
+namespace core
+{
+class ReferenceBuffer;
+}  // namespace core
+}  // namespace audio_common_lib
+}  // namespace qrb
+
+namespace qrb
+{
+namespace audio_common_lib
+{
+namespace core
+{
+
+// Opaque per-processor settings. Concrete processors (NS/VAD/AEC) define
+// their own typed config struct; this string map is only what crosses the
+// ProcessingPipeline boundary before a processor parses it into its own type,
+// mirroring how AudioStreamConfig::ProcessorSlot stays generic. Keeps the
+// pipeline from depending on every processor's config type.
+using ProcessorConfig = std::map<std::string, std::string>;
+
+enum class ProcessResultStatus
+{
+  kProcessed,  // frame was modified in place
+  kBypassed,   // processor chose not to touch this frame (disabled/degraded)
+  kFailed,     // processing failed; frame is unchanged, caller decides bypass/stop
+};
+
+struct ProcessResult
+{
+  ProcessResultStatus status = ProcessResultStatus::kProcessed;
+  Result result = Result::Ok();  // set when status == kFailed
+};
+
+// Context passed alongside a frame so a processor can see stream-level facts
+// (e.g. an AEC needs frame_duration_ms and sample_rate to size its internal
+// buffers) without taking a dependency on AudioStreamConfig itself.
+struct ProcessingContext
+{
+  uint32_t sample_rate = 0;
+  uint8_t channels = 0;
+  uint32_t frame_duration_ms = 0;
+  uint8_t sample_format = 16;  // bit depth
+  // Echo reference for stages with needs_reference() (AEC), owned by
+  // ProcessingCaptureBackend and valid from prepare() until the pipeline is
+  // destroyed. Null when the stream has no reference source; such a stage
+  // must still run (passing audio through) rather than fail.
+  ReferenceBuffer * reference = nullptr;
+};
+
+// A single stage in a ProcessingPipeline (NS, VAD, AEC, or a test double).
+// For capture, process() runs on ProcessingCaptureBackend's worker thread,
+// not on the PulseAudio mainloop, and always gets exactly
+// ProcessingContext::frame_duration_ms of audio (10 ms in production; see
+// ChunkReframer). The block buffer is exclusively owned for the duration of
+// the call, so it may be modified in place. process() should still be
+// prompt and allocation-free in steady state: the worker has a bounded
+// queue, and a processor slower than real time makes it drop whole chunks.
+// Failure policy: refactoring_plan.md section 6.4 / ProcessingPipeline.
+class IAudioProcessor
+{
+public:
+  virtual ~IAudioProcessor() = default;
+
+  virtual std::string name() const = 0;
+
+  // Called once before the first process() call, and again whenever the
+  // pipeline reconfigures this slot (e.g. sample_rate changed, which usually
+  // requires a full stream rebuild rather than a live reconfigure - see
+  // refactoring_plan.md section 5.3 on which fields support hot-reconfigure).
+  virtual Result configure(const ProcessorConfig & config) = 0;
+
+  // Called once per stream, after configure() and before the first
+  // process(), with the stream's real format. A processor that cannot handle
+  // the format (e.g. WebRTC needs 16-bit at 8/16/32/48 kHz in 10 ms blocks)
+  // returns an error here instead of failing every frame; the pipeline then
+  // bypasses it for this stream (see ProcessingPipeline::prepare). Must not
+  // throw. Default: any format is fine.
+  virtual Result prepare(const ProcessingContext & context)
+  {
+    (void)context;
+    return Result::Ok();
+  }
+
+  // Mutates `frame` in place when status is kProcessed. Must not change
+  // frame.sample_rate/channels/sample_format, frame.sequence or
+  // frame.timestamp_usec - only frame.data and frame.flags are the
+  // processor's to touch. Must return promptly: no sleeping, no blocking
+  // locks, no file/network I/O.
+  virtual ProcessResult process(AudioFrame & frame, const ProcessingContext & context) = 0;
+
+  // Clears internal state (adaptive filter history, VAD hangover counters,
+  // etc.) without requiring a full configure() + object recreation. Called
+  // when a stream restarts without a full teardown.
+  virtual void reset() = 0;
+
+  // Fixed input->output delay of process() in sample frames at the prepared
+  // rate (WebRTC APM: band-split filter bank + NS/AEC framing, e.g. 718
+  // frames = 15 ms for AEC+NS at 48 kHz). ProcessingCaptureBackend subtracts
+  // the chain total from delivered timestamps so AudioFrame::timestamp_usec
+  // stays "capture time of the audio in the first sample". Valid after a
+  // successful prepare().
+  virtual uint32_t latency_frames() const { return 0; }
+
+  // True if this stage consumes ProcessingContext::reference (AEC).
+  virtual bool needs_reference() const { return false; }
+
+  // One-line runtime summary for the stop() log (e.g. AEC delay/ERLE and
+  // reference availability). Called on the processing thread.
+  virtual std::string diagnostics() const { return std::string(); }
+};
+
+}  // namespace core
+}  // namespace audio_common_lib
+}  // namespace qrb
+
+#endif  // QRB_AUDIO_COMMON_LIB__CORE__AUDIO_PROCESSOR_HPP_

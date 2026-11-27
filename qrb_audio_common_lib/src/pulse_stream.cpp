@@ -15,8 +15,6 @@
 
 using namespace std;
 
-#define PLAYBACK_BUFFER_DURATION_MS 300
-#define CAPTURE_FRAGMENT_DURATION_MS 80
 #define RECORD_GAIN 8
 
 namespace qrb
@@ -100,8 +98,37 @@ void PulseCommonStream::pulse_context_time_event_callback(pa_mainloop_api * m,
   pa_context_rttime_restart(pulse_context_, e, pa_rtclock_now() + TIME_EVENT_USEC);
 }
 
+// timestamp_streams_ is iterated by pulse_context_time_event_callback on the
+// mainloop thread, and pa_context_rttime_new()/time_free() are PA API calls:
+// both must happen under the threaded-mainloop lock when called from another
+// thread (the ROS service thread, in practice). The original code did
+// neither; harmless only because need_timestamp was never set to true by any
+// caller before 2026-11-26.
+namespace
+{
+class MainloopLock
+{
+public:
+  explicit MainloopLock(pa_threaded_mainloop * m)
+    : m_(m && !pa_threaded_mainloop_in_thread(m) ? m : nullptr)
+  {
+    if (m_)
+      pa_threaded_mainloop_lock(m_);
+  }
+  ~MainloopLock()
+  {
+    if (m_)
+      pa_threaded_mainloop_unlock(m_);
+  }
+
+private:
+  pa_threaded_mainloop * m_;
+};
+}  // namespace
+
 int PulseCommonStream::register_stream_timestamp_event(PulseCommonStream * stream_handle)
 {
+  MainloopLock lock(pulse_mainloop_);
   timestamp_streams_.insert(stream_handle);
 
   if (pulse_context_time_event_ == nullptr) {
@@ -120,6 +147,7 @@ int PulseCommonStream::register_stream_timestamp_event(PulseCommonStream * strea
 
 void PulseCommonStream::deregister_stream_timestamp_event(PulseCommonStream * stream_handle)
 {
+  MainloopLock lock(pulse_mainloop_);
   timestamp_streams_.erase(stream_handle);
 
   if ((timestamp_streams_.size() == 0) && pulse_context_time_event_) {
@@ -270,21 +298,96 @@ void PulseCommonStream::clean_pulse_mainloop()
   };
 }
 
-void PulseCommonStream::check_context_ready()
+// Bounded wait. This used to spin forever, so a pipewire-pulse that never
+// finished the handshake (or failed it: PA_CONTEXT_FAILED) hung whichever ROS
+// service call happened to open the first stream, with no error ever
+// returned. Observed on real hardware while pipewire-pulse was being
+// restarted under the caller (create stuck at "pulse_context_state_ = 1").
+bool PulseCommonStream::check_context_ready()
 {
-  for (;;) {
-    if (pulse_context_state_ == PA_CONTEXT_READY)
-      break;
-    usleep(5000);
+  constexpr int kTimeoutMs = 5000;
+  constexpr int kPollUs = 5000;
+  for (int waited_us = 0; waited_us < kTimeoutMs * 1000; waited_us += kPollUs) {
+    pa_context_state_t state = pulse_context_state_;
+    if (state == PA_CONTEXT_READY)
+      return true;
+    if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED) {
+      LOGE("pulse context failed (state %d)", state);
+      return false;
+    }
+    usleep(kPollUs);
   }
+  LOGE("pulse context not ready after %d ms (state %d)", kTimeoutMs, pulse_context_state_);
+  return false;
 }
 
-PulseCommonStream::PulseCommonStream(string filepath, std::shared_ptr<pa_sample_spec> sample_spec)
-  : file_path(filepath), sample_spec(sample_spec)
+namespace
+{
+struct SourceListQuery
+{
+  pa_threaded_mainloop * mainloop;
+  std::vector<std::string> * names;
+  bool done = false;
+  bool failed = false;
+};
+
+void source_info_list_callback(pa_context *, const pa_source_info * info, int eol, void * userdata)
+{
+  auto * query = static_cast<SourceListQuery *>(userdata);
+  if (eol < 0) {
+    query->failed = true;
+    query->done = true;
+  } else if (eol > 0) {
+    query->done = true;
+  } else if (info && info->name) {
+    query->names->emplace_back(info->name);
+  }
+  pa_threaded_mainloop_signal(query->mainloop, 0);
+}
+}  // namespace
+
+int PulseCommonStream::list_sources(std::vector<std::string> & names)
+{
+  names.clear();
+  if (pulse_context_ == nullptr) {
+    if (init_pulse_env() == nullptr)
+      return -EIO;
+  }
+  if (!check_context_ready())
+    return -EIO;
+
+  SourceListQuery query{pulse_mainloop_, &names};
+
+  pa_threaded_mainloop_lock(pulse_mainloop_);
+  pa_operation * op =
+      pa_context_get_source_info_list(pulse_context_, source_info_list_callback, &query);
+  if (op == nullptr) {
+    LOGE("pa_context_get_source_info_list failed: %s",
+        pa_strerror(pa_context_errno(pulse_context_)));
+    pa_threaded_mainloop_unlock(pulse_mainloop_);
+    return -EIO;
+  }
+  while (!query.done && pa_operation_get_state(op) == PA_OPERATION_RUNNING)
+    pa_threaded_mainloop_wait(pulse_mainloop_);
+  pa_operation_unref(op);
+  pa_threaded_mainloop_unlock(pulse_mainloop_);
+
+  if (query.failed || !query.done) {
+    LOGE("source enumeration failed");
+    return -EIO;
+  }
+  return 0;
+}
+
+PulseCommonStream::PulseCommonStream(string filepath,
+    std::shared_ptr<pa_sample_spec> sample_spec,
+    string device)
+  : sample_spec(sample_spec), file_path(filepath), device(device)
 {
   if (PulseCommonStream::pulse_context_ == nullptr) {
     PulseCommonStream::init_pulse_env();
-    PulseCommonStream::check_context_ready();
+    if (!PulseCommonStream::check_context_ready())
+      throw std::runtime_error("pulse context not ready");
   }
 }
 
@@ -349,12 +452,21 @@ uint32_t PulseCommonStream::audio_stream_open(const AudioStreamInfo & stream_inf
   }
 
   try {
-    if (stream_info.type == StreamType::Playback)
-      stream = new PlaybackStream(string(stream_info.file_path), streasample_spec);
-    else if (stream_info.type == StreamType::Capture)
-      stream = new CaptureStream(string(stream_info.file_path), streasample_spec);
-    else
+    if (stream_info.type == StreamType::Playback) {
+      uint32_t buffer_duration_ms = stream_info.buffer_duration_ms ?
+                                        stream_info.buffer_duration_ms :
+                                        DEFAULT_PLAYBACK_BUFFER_DURATION_MS;
+      stream = new PlaybackStream(
+          string(stream_info.file_path), streasample_spec, stream_info.device, buffer_duration_ms);
+    } else if (stream_info.type == StreamType::Capture) {
+      uint32_t fragment_duration_ms = stream_info.fragment_duration_ms ?
+                                          stream_info.fragment_duration_ms :
+                                          DEFAULT_CAPTURE_FRAGMENT_DURATION_MS;
+      stream = new CaptureStream(string(stream_info.file_path), streasample_spec,
+          stream_info.device, fragment_duration_ms);
+    } else {
       stream = nullptr;
+    }
   } catch (const std::runtime_error & e) {
     LOGE("create stream error:%s", e.what());
     stream = nullptr;
@@ -377,14 +489,24 @@ uint32_t PulseCommonStream::audio_stream_open(const AudioStreamInfo & stream_inf
   stream->event_cb = event_callback;
   stream->pcm_mode = stream_info.pcm_mode;
 
+  stream->need_timestamp = stream_info.need_timestamp;
   if (stream_info.need_timestamp)
     register_stream_timestamp_event(stream);
 
   return IAudioStream::register_stream(stream);
 }
 
+// Thread safety: every pa_stream_* / pa_context_* call below runs on a ROS
+// service or subscription thread, while the threaded mainloop concurrently
+// dispatches events for ALL streams of the process. libpulse requires the
+// threaded-mainloop lock for every such call made outside the mainloop thread.
+// The original code took it only around the wait loops; with two streams
+// starting back to back (AEC mic + echo reference) this aborted the process
+// in pa_queue_pop() ("Assertion '!e->next' failed") after ~80
+// create/start/stop/release cycles on the board.
 void PulseCommonStream::init_pulse_stream()
 {
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   pa_channel_map channel_map;
 
   pa_channel_map_init_extend(&channel_map, sample_spec->channels, PA_CHANNEL_MAP_DEFAULT);
@@ -411,6 +533,7 @@ int PulseCommonStream::pause_stream(bool pause)
     return -1;
   }
 
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   pa_operation * op_pause = pa_stream_cork(stream_handle_, pause, nullptr, nullptr);
   if (op_pause)
     pa_operation_unref(op_pause);
@@ -420,13 +543,16 @@ int PulseCommonStream::pause_stream(bool pause)
 
 int PulseCommonStream::mute_stream(bool mute)
 {
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   uint32_t stream_index = pa_stream_get_index(stream_handle_);
   pa_operation * op = pa_context_set_sink_input_mute(
       PulseCommonStream::pulse_context_, stream_index, mute, nullptr, nullptr);
-  if (!op) {
+  if (op) {
+    pa_operation_unref(op);  // was leaked on success
+  } else {
+    // was pa_operation_unref(nullptr) here, an assertion failure in libpulse
     LOGE("failed to set stream(%p) to %s", static_cast<void *>(stream_handle_),
         mute ? "mute" : "unmute");
-    pa_operation_unref(op);
   }
 
   return 0;
@@ -449,11 +575,11 @@ int PulseCommonStream::stop_stream()
   PulseCommonStream::deregister_stream_timestamp_event(this);
   repeat_count = 0;
 
+  // One lock for disconnect + wait (the wait needs the lock held exactly once).
+  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
   if (pa_stream_disconnect(stream_handle_) < 0) {
     LOGE("Disconnect Stream fail");
   }
-
-  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
   while (stream_state_ != PA_STREAM_TERMINATED)
     pa_threaded_mainloop_wait(PulseCommonStream::pulse_mainloop_);
   pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
@@ -477,6 +603,7 @@ int PulseCommonStream::close_stream()
     return -EPERM;
   }
   if (stream_handle_) {
+    MainloopLock lock(PulseCommonStream::pulse_mainloop_);
     pa_stream_set_state_callback(stream_handle_, nullptr, nullptr);
     pa_stream_set_underflow_callback(stream_handle_, nullptr, nullptr);
     pa_stream_set_overflow_callback(stream_handle_, nullptr, nullptr);
@@ -526,8 +653,11 @@ static void stream_drain_complete(pa_stream * stream, int success, void * userda
   }
 }
 
-PlaybackStream::PlaybackStream(string filepath, std::shared_ptr<pa_sample_spec> sample_spec)
-  : PulseCommonStream(filepath, sample_spec)
+PlaybackStream::PlaybackStream(string filepath,
+    std::shared_ptr<pa_sample_spec> sample_spec,
+    string device,
+    uint32_t buffer_duration_ms)
+  : PulseCommonStream(filepath, sample_spec, device), buffer_duration_ms_(buffer_duration_ms)
 {
   if (!filepath.empty()) {
     if (sndfile_open())
@@ -539,6 +669,7 @@ PlaybackStream::PlaybackStream(string filepath, std::shared_ptr<pa_sample_spec> 
   init_pulse_stream();
 
   if (!file_path.empty()) {
+    MainloopLock lock(PulseCommonStream::pulse_mainloop_);
     pa_stream_set_write_callback(get_stream_handle(), PlaybackStream::stream_data_callback, this);
   }
 }
@@ -560,16 +691,16 @@ int PlaybackStream::start_stream()
 
   buffer_attr.maxlength = (uint32_t)-1;
   buffer_attr.tlength = (uint32_t)-1;
-  buffer_attr.prebuf =
-      pa_usec_to_bytes(PLAYBACK_BUFFER_DURATION_MS * PA_USEC_PER_MSEC, sample_spec.get());
-  buffer_attr.minreq =
-      pa_usec_to_bytes(PLAYBACK_BUFFER_DURATION_MS * PA_USEC_PER_MSEC, sample_spec.get());
+  buffer_attr.prebuf = pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
+  buffer_attr.minreq = pa_usec_to_bytes(buffer_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
   buffer_attr.fragsize = (uint32_t)-1;
 
   pa_cvolume_set(&volume, sample_spec->channels, PA_VOLUME_NORM * stream_volume / STREAM_VOL_MAX);
 
+  const char * sink_name = device.empty() ? nullptr : device.c_str();
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   if (pa_stream_connect_playback(
-          get_stream_handle(), nullptr, &buffer_attr, flags, &volume, nullptr)) {
+          get_stream_handle(), sink_name, &buffer_attr, flags, &volume, nullptr)) {
     LOGE("pa_stream_connect_playback() failed: %s",
         pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
     return -EIO;
@@ -647,6 +778,7 @@ int PlaybackStream::write_data(const void * buf, size_t length)
   size_t bytes_written;
   int bytes_total_written = 0;
 
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);  // called from a ROS subscription thread
   if (get_stream_state() == PA_STREAM_READY) {
     size_t remaining = length;
     while (remaining > 0) {
@@ -712,8 +844,11 @@ void PlaybackStream::stream_data_callback(pa_stream * stream, size_t length, voi
   }
 }
 
-CaptureStream::CaptureStream(string filepath, std::shared_ptr<pa_sample_spec> sample_spec)
-  : PulseCommonStream(filepath, sample_spec)
+CaptureStream::CaptureStream(string filepath,
+    std::shared_ptr<pa_sample_spec> sample_spec,
+    string device,
+    uint32_t fragment_duration_ms)
+  : PulseCommonStream(filepath, sample_spec, device), fragment_duration_ms_(fragment_duration_ms)
 {
   if (!file_path.empty()) {
     if (sndfile_open()) {
@@ -727,6 +862,7 @@ CaptureStream::CaptureStream(string filepath, std::shared_ptr<pa_sample_spec> sa
 
   init_pulse_stream();
 
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   pa_stream_set_read_callback(get_stream_handle(), CaptureStream::stream_data_callback, this);
 }
 
@@ -747,7 +883,7 @@ int CaptureStream::start_stream()
 
   buffer_attr.maxlength = (uint32_t)-1;
   buffer_attr.fragsize =
-      pa_usec_to_bytes(CAPTURE_FRAGMENT_DURATION_MS * PA_USEC_PER_MSEC, sample_spec.get());
+      pa_usec_to_bytes(fragment_duration_ms_ * PA_USEC_PER_MSEC, sample_spec.get());
   buffer_attr.prebuf = (uint32_t)-1;
   buffer_attr.tlength = (uint32_t)-1;
   buffer_attr.minreq = (uint32_t)-1;
@@ -755,20 +891,36 @@ int CaptureStream::start_stream()
   pa_cvolume_set(&volume, sample_spec->channels,
       PA_VOLUME_NORM * stream_volume / STREAM_VOL_MAX * RECORD_GAIN);
 
-  if (pa_stream_connect_record(stream, nullptr, &buffer_attr, flags)) {
+  const char * source_name = device.empty() ? nullptr : device.c_str();
+  // One lock for connect + wait + volume (the wait needs the lock held exactly once).
+  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
+  if (pa_stream_connect_record(stream, source_name, &buffer_attr, flags)) {
     LOGE("pa_stream_connect_record() failed: %s",
         pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
+    pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
     return -EIO;
   }
 
-  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
-  while (get_stream_state() != PA_STREAM_READY)
+  // Must also stop on FAILED/TERMINATED: waiting for READY alone never
+  // returns if the server rejects the stream (pulse_stream_state_callback
+  // still signals the mainloop on those transitions).
+  while (get_stream_state() != PA_STREAM_READY && get_stream_state() != PA_STREAM_FAILED &&
+         get_stream_state() != PA_STREAM_TERMINATED)
     pa_threaded_mainloop_wait(PulseCommonStream::pulse_mainloop_);
-  pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
+
+  if (get_stream_state() != PA_STREAM_READY) {
+    LOGE("capture stream failed to connect (state %d): %s", get_stream_state(),
+        pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
+    pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
+    return -EIO;
+  }
 
   uint32_t stream_index = pa_stream_get_index(stream);
-  pa_context_set_source_output_volume(
+  pa_operation * op = pa_context_set_source_output_volume(
       PulseCommonStream::pulse_context_, stream_index, &volume, nullptr, nullptr);
+  if (op)
+    pa_operation_unref(op);  // was leaked on every start
+  pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
 
   return 0;
 }
@@ -837,6 +989,23 @@ void CaptureStream::stream_data_callback(pa_stream * stream, size_t length, void
     const void * data;
     std::chrono::steady_clock::time_point read_start = std::chrono::steady_clock::now();
 
+    // Capture-time inputs for CaptureTimestamper, sampled BEFORE
+    // pa_stream_drop(): at this point the chunk is still counted in the
+    // stream's buffered data, so the record latency equals the age of the
+    // chunk's first sample. Only when the caller asked for timestamps, so the
+    // default path does no extra work.
+    uint64_t arrival_mono_usec = 0;
+    int64_t latency_usec = -1;
+    if (current_stream->need_timestamp) {
+      arrival_mono_usec = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(read_start.time_since_epoch())
+              .count());
+      pa_usec_t lat = 0;
+      int negative = 0;
+      if (pa_stream_get_latency(stream, &lat, &negative) == 0)
+        latency_usec = negative ? 0 : static_cast<int64_t>(lat);
+    }
+
     if (pa_stream_peek(stream, &data, &length) < 0) {
       LOGE("pa_stream_peek() failed(%s)",
           pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
@@ -859,6 +1028,8 @@ void CaptureStream::stream_data_callback(pa_stream * stream, size_t length, void
           std::chrono::steady_clock::now() - read_start)
                            .count();
       s_event_data.usec = static_cast<uint64_t>(read_usec);
+      s_event_data.arrival_mono_usec = arrival_mono_usec;
+      s_event_data.latency_usec = latency_usec;
 
       current_stream->event_cb(StreamEvent::StreamData, s_event_data, (void *)stream_handle);
       bytes = length;

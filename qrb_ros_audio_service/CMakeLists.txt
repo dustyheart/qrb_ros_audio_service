@@ -36,4 +36,7 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
+# Example client used by launch/voice_frontend.launch.py (ros2 run-able)
+install(PROGRAMS scripts/voice_frontend_client.py DESTINATION lib/${PROJECT_NAME})
+
 ament_auto_package(INSTALL_TO_SHARE launch)
