@@ -11,20 +11,61 @@ find_package(Threads REQUIRED)
 pkg_check_modules(ALSA REQUIRED alsa)
 pkg_check_modules(SNDFILE REQUIRED sndfile)
 
-# Optional: WebRTC NS/VAD processors ("ns", "vad"). Without the library
-# everything else builds and works; asking for ns/vad then fails with a
-# message naming the missing package.
-option(QRB_AUDIO_ENABLE_WEBRTC "Build WebRTC NS/VAD processors if webrtc-audio-processing is found" ON)
+# Optional: WebRTC capture processors. Without a library everything else
+# builds and works; asking for a missing processor fails with a message
+# naming the package.
+#   v1     - webrtc-audio-processing 1.x (pkg-config webrtc-audio-processing-1):
+#            "aec" (AEC3), "ns", "vad"; aec + ns share one APM.
+#   legacy - system webrtc-audio-processing 0.3.1 (Ubuntu 24.04
+#            libwebrtc-audio-processing-dev): "ns", "vad" only, no AEC.
+#   auto   - v1 if found, else legacy if found, else none.
+# The two libraries export ~400 identical symbols, so exactly one is ever
+# linked (stage 6, aec3_ab_test.md). 1.x is not packaged for Ubuntu 24.04:
+# build it (meson) and point QRB_AUDIO_WEBRTC1_PREFIX (or PKG_CONFIG_PATH) at
+# its install prefix; the library is then found through an RPATH.
+option(QRB_AUDIO_ENABLE_WEBRTC "Build WebRTC capture processors if a webrtc-audio-processing is found" ON)
+set(QRB_AUDIO_WEBRTC_IMPL "auto" CACHE STRING "WebRTC implementation: auto, v1 or legacy")
+set_property(CACHE QRB_AUDIO_WEBRTC_IMPL PROPERTY STRINGS auto v1 legacy)
+set(QRB_AUDIO_WEBRTC1_PREFIX "$ENV{QRB_AUDIO_WEBRTC1_PREFIX}" CACHE PATH
+    "Install prefix of webrtc-audio-processing 1.x (optional, adds it to the pkg-config path)")
+set(QRB_AUDIO_WEBRTC "none")
 if(QRB_AUDIO_ENABLE_WEBRTC)
-  pkg_check_modules(WEBRTC_APM QUIET webrtc-audio-processing)
+  if(NOT QRB_AUDIO_WEBRTC_IMPL MATCHES "^(auto|v1|legacy)$")
+    message(FATAL_ERROR "QRB_AUDIO_WEBRTC_IMPL must be auto, v1 or legacy, got '${QRB_AUDIO_WEBRTC_IMPL}'")
+  endif()
+  if(QRB_AUDIO_WEBRTC_IMPL MATCHES "^(auto|v1)$")
+    if(QRB_AUDIO_WEBRTC1_PREFIX)
+      file(GLOB _qrb_webrtc1_pc_dirs "${QRB_AUDIO_WEBRTC1_PREFIX}/lib/pkgconfig"
+           "${QRB_AUDIO_WEBRTC1_PREFIX}/lib/*/pkgconfig")
+      foreach(_d ${_qrb_webrtc1_pc_dirs})
+        set(ENV{PKG_CONFIG_PATH} "${_d}:$ENV{PKG_CONFIG_PATH}")
+      endforeach()
+    endif()
+    pkg_check_modules(WEBRTC_APM1 QUIET webrtc-audio-processing-1)
+    if(WEBRTC_APM1_FOUND)
+      set(QRB_AUDIO_WEBRTC "v1")
+    elseif(QRB_AUDIO_WEBRTC_IMPL STREQUAL "v1")
+      message(WARNING "qrb_audio_common_lib: QRB_AUDIO_WEBRTC_IMPL=v1 but webrtc-audio-processing-1 "
+                      "was not found (set QRB_AUDIO_WEBRTC1_PREFIX); building without WebRTC processors.")
+    endif()
+  endif()
+  if(QRB_AUDIO_WEBRTC STREQUAL "none" AND QRB_AUDIO_WEBRTC_IMPL MATCHES "^(auto|legacy)$")
+    pkg_check_modules(WEBRTC_APM QUIET webrtc-audio-processing)
+    if(WEBRTC_APM_FOUND)
+      set(QRB_AUDIO_WEBRTC "legacy")
+    endif()
+  endif()
 endif()
-if(WEBRTC_APM_FOUND)
-  message(STATUS "qrb_audio_common_lib: WebRTC NS/VAD enabled (webrtc-audio-processing ${WEBRTC_APM_VERSION})")
+if(QRB_AUDIO_WEBRTC STREQUAL "v1")
+  message(STATUS "qrb_audio_common_lib: WebRTC AEC/NS/VAD enabled (webrtc-audio-processing ${WEBRTC_APM1_VERSION}, ${WEBRTC_APM1_LIBDIR})")
+elseif(QRB_AUDIO_WEBRTC STREQUAL "legacy")
+  message(STATUS "qrb_audio_common_lib: WebRTC NS/VAD enabled, no AEC (webrtc-audio-processing ${WEBRTC_APM_VERSION})")
 elseif(QRB_AUDIO_ENABLE_WEBRTC)
-  message(WARNING "qrb_audio_common_lib: webrtc-audio-processing not found - 'ns'/'vad' capture "
-                  "processors are disabled. Install libwebrtc-audio-processing-dev to enable them.")
+  message(WARNING "qrb_audio_common_lib: no webrtc-audio-processing found - 'aec'/'ns'/'vad' capture "
+                  "processors are disabled. Build webrtc-audio-processing 1.x (set "
+                  "QRB_AUDIO_WEBRTC1_PREFIX) or install libwebrtc-audio-processing-dev (ns/vad only).")
 else()
-  message(STATUS "qrb_audio_common_lib: WebRTC NS/VAD disabled (QRB_AUDIO_ENABLE_WEBRTC=OFF)")
+  message(STATUS "qrb_audio_common_lib: WebRTC processors disabled (QRB_AUDIO_ENABLE_WEBRTC=OFF)")
 endif()
 
 add_library(${PROJECT_NAME} SHARED
@@ -38,7 +79,16 @@ add_library(${PROJECT_NAME} SHARED
   src/core/processor_factory.cpp
 )
 
-if(WEBRTC_APM_FOUND)
+if(QRB_AUDIO_WEBRTC STREQUAL "v1")
+  target_sources(${PROJECT_NAME} PRIVATE src/core/webrtc1_processors.cpp)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE QRB_AUDIO_HAVE_WEBRTC_APM1)
+  target_compile_options(${PROJECT_NAME} PRIVATE ${WEBRTC_APM1_CFLAGS_OTHER})
+  # SYSTEM: keep warnings from the library's (and abseil's) own headers out.
+  target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${WEBRTC_APM1_INCLUDE_DIRS})
+  target_link_libraries(${PROJECT_NAME} PRIVATE ${WEBRTC_APM1_LINK_LIBRARIES})
+  # 1.x usually lives in a private prefix: let the installed library find it.
+  set_target_properties(${PROJECT_NAME} PROPERTIES INSTALL_RPATH "${WEBRTC_APM1_LIBRARY_DIRS}")
+elseif(QRB_AUDIO_WEBRTC STREQUAL "legacy")
   target_sources(${PROJECT_NAME} PRIVATE src/core/webrtc_processors.cpp)
   target_compile_definitions(${PROJECT_NAME} PRIVATE QRB_AUDIO_HAVE_WEBRTC_APM)
   target_compile_options(${PROJECT_NAME} PRIVATE ${WEBRTC_APM_CFLAGS_OTHER})
@@ -109,11 +159,22 @@ if(BUILD_TESTING)
   target_include_directories(core_vad_hangover_test PRIVATE include)
   add_test(NAME core_vad_hangover_test COMMAND core_vad_hangover_test)
 
-  if(WEBRTC_APM_FOUND)
+  add_executable(core_reference_buffer_test test/core_reference_buffer_test.cpp)
+  target_include_directories(core_reference_buffer_test PRIVATE include)
+  target_link_libraries(core_reference_buffer_test Threads::Threads)
+  add_test(NAME core_reference_buffer_test COMMAND core_reference_buffer_test)
+
+  if(NOT QRB_AUDIO_WEBRTC STREQUAL "none")
     add_executable(core_webrtc_processors_test test/core_webrtc_processors_test.cpp)
     target_include_directories(core_webrtc_processors_test PRIVATE include)
     target_link_libraries(core_webrtc_processors_test ${PROJECT_NAME})
     add_test(NAME core_webrtc_processors_test COMMAND core_webrtc_processors_test)
+  endif()
+  if(QRB_AUDIO_WEBRTC STREQUAL "v1")
+    add_executable(core_aec_test test/core_aec_test.cpp)
+    target_include_directories(core_aec_test PRIVATE include)
+    target_link_libraries(core_aec_test ${PROJECT_NAME} Threads::Threads)
+    add_test(NAME core_aec_test COMMAND core_aec_test)
   endif()
 
   # Hardware-dependent; not registered with CTest, built for manual use only.

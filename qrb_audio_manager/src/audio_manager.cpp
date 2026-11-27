@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <cstdlib>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -108,6 +109,23 @@ static qrb::audio_common_lib::core::AudioStreamConfig make_capture_config(
                                  backend_defaults.capture_fragment_duration_ms :
                                  20;
   config.need_timestamp = configs->need_timestamp;
+  // "aec" stage: echo reference source and pairing lead come from its slot
+  // config (AudioServer fills the aec_reference_device default in).
+  for (const auto & slot : config.processors) {
+    if (slot.name != "aec" || slot.bypassed)
+      continue;
+    auto dev = slot.config.find("reference_device");
+    if (dev != slot.config.end() && !dev->second.empty())
+      config.reference_device = dev->second;
+    auto resync = slot.config.find("reference_resync_ms");
+    if (resync != slot.config.end())
+      config.reference_resync_ms =
+          static_cast<uint32_t>(std::strtoul(resync->second.c_str(), nullptr, 10));
+    auto lead = slot.config.find("reference_lead_ms");
+    if (lead != slot.config.end())
+      config.reference_lead_ms =
+          static_cast<uint32_t>(std::strtoul(lead->second.c_str(), nullptr, 10));
+  }
   return config;
 }
 
@@ -157,8 +175,13 @@ static bool audio_common_stream_cb(const void * const payload,
     // starts dropping instead of building seconds of latency.
     const uint32_t chunk_ms = config.fragment_duration_ms ? config.fragment_duration_ms : 80;
     const size_t queue_chunks = std::max<size_t>(8, (2000 + chunk_ms - 1) / chunk_ms);
+    // Echo reference stream (sink monitor) only when a stage needs it (AEC).
+    std::unique_ptr<core::IAudioCaptureBackend> reference;
+    if (pipeline && pipeline->needs_reference())
+      reference = std::make_unique<core::PipeWirePulseBackend>();
     auto backend = std::make_shared<core::ProcessingCaptureBackend>(
-        std::make_unique<core::PipeWirePulseBackend>(), std::move(pipeline), queue_chunks);
+        std::make_unique<core::PipeWirePulseBackend>(), std::move(pipeline), queue_chunks,
+        std::move(reference));
     result = backend->configure(config);
     if (!result.ok()) {
       AM_LOGE(LOG_TAG, "capture backend configure failed: " << result.to_log_string());

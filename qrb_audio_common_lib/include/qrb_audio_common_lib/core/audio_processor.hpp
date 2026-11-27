@@ -17,6 +17,17 @@ namespace audio_common_lib
 {
 namespace core
 {
+class ReferenceBuffer;
+}  // namespace core
+}  // namespace audio_common_lib
+}  // namespace qrb
+
+namespace qrb
+{
+namespace audio_common_lib
+{
+namespace core
+{
 
 // Opaque per-processor settings. Concrete processors (NS/VAD/AEC) define
 // their own typed config struct; this string map is only what crosses the
@@ -47,6 +58,11 @@ struct ProcessingContext
   uint8_t channels = 0;
   uint32_t frame_duration_ms = 0;
   uint8_t sample_format = 16;  // bit depth
+  // Echo reference for stages with needs_reference() (AEC), owned by
+  // ProcessingCaptureBackend and valid from prepare() until the pipeline is
+  // destroyed. Null when the stream has no reference source; such a stage
+  // must still run (passing audio through) rather than fail.
+  ReferenceBuffer * reference = nullptr;
 };
 
 // A single stage in a ProcessingPipeline (NS, VAD, AEC, or a test double).
@@ -94,6 +110,21 @@ public:
   // etc.) without requiring a full configure() + object recreation. Called
   // when a stream restarts without a full teardown.
   virtual void reset() = 0;
+
+  // Fixed input->output delay of process() in sample frames at the prepared
+  // rate (WebRTC APM: band-split filter bank + NS/AEC framing, e.g. 718
+  // frames = 15 ms for AEC+NS at 48 kHz). ProcessingCaptureBackend subtracts
+  // the chain total from delivered timestamps so AudioFrame::timestamp_usec
+  // stays "capture time of the audio in the first sample". Valid after a
+  // successful prepare().
+  virtual uint32_t latency_frames() const { return 0; }
+
+  // True if this stage consumes ProcessingContext::reference (AEC).
+  virtual bool needs_reference() const { return false; }
+
+  // One-line runtime summary for the stop() log (e.g. AEC delay/ERLE and
+  // reference availability). Called on the processing thread.
+  virtual std::string diagnostics() const { return std::string(); }
 };
 
 }  // namespace core

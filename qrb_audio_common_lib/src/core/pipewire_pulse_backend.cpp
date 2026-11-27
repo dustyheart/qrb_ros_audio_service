@@ -33,6 +33,10 @@ Result PipeWirePulseBackend::check_capture_device(const std::string & device)
 {
   if (device.empty())
     return Result::Ok();
+  // PulseAudio special names (@DEFAULT_SOURCE@, @DEFAULT_MONITOR@) resolve
+  // server-side and never appear in the source list.
+  if (device.size() > 2 && device.front() == '@' && device.back() == '@')
+    return Result::Ok();
 
   std::vector<std::string> sources;
   int ret = audio_list_capture_devices(sources);

@@ -44,8 +44,9 @@ public:
   Result stop() override;
   AudioBackendStatus status() const override { return status_; }
 
-  // kOk if `device` is empty (= server default) or names an existing capture
-  // source; kDeviceUnavailable (message lists the available sources) if not;
+  // kOk if `device` is empty (= server default), is a PulseAudio special
+  // name ("@DEFAULT_MONITOR@" etc., resolved by the server) or names an
+  // existing capture source; kDeviceUnavailable (message lists the available sources) if not;
   // kBackendInitFailed if the server couldn't be queried. kOk without
   // checking if the process-wide backend is ALSA (it can't enumerate, and
   // rejects bad names itself at open time) - lets AudioManager's legacy

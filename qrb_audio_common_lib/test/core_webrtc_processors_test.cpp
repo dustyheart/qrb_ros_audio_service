@@ -1,11 +1,13 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-// WebRTC "ns"/"vad" processors (webrtc-audio-processing 0.3.1): config
+// WebRTC "ns"/"vad" processors - whichever implementation the library was
+// built with (webrtc-audio-processing 1.x, or the system 0.3.1): config
 // validation, format guard (bypass, never crash), NS noise reduction, VAD on
 // silence and on real speech, VAD never touches PCM, VAD failure never blocks
-// PCM, and VAD decisions reaching re-assembled chunks through
-// ProcessingCaptureBackend. Only built when the library is found.
+// PCM, VAD decisions reaching re-assembled chunks through
+// ProcessingCaptureBackend, and latency_frames() equal to the delay actually
+// measured through the APM (stage 6). Only built when a library is found.
 //
 // Real speech: /usr/share/sounds/alsa/Front_Center.wav (alsa-utils, 48 kHz
 // mono S16). If it is missing, the speech case is skipped with a message.
@@ -398,6 +400,64 @@ void test_ns_vad_chain_through_capture_backend()
       (unsigned long long)(s.processors[1].total_process_usec / 100));
 }
 
+// Measures the input->output lag of a chain by cross-correlating white
+// noise, and checks it against ProcessingPipeline::latency_frames(), which is
+// what ProcessingCaptureBackend subtracts from timestamps.
+void test_latency_matches_measurement()
+{
+  std::vector<std::vector<std::string>> chains = {{"ns"}, {"ns:highpass=true"}, {"ns", "vad"}};
+  if (webrtc_aec_available()) {
+    chains.push_back({"aec"});
+    chains.push_back({"aec", "ns"});
+    chains.push_back({"aec", "ns", "vad"});
+  }
+  for (uint32_t rate : {8000u, 16000u, 32000u, 48000u}) {
+    for (uint8_t ch : {uint8_t(1), uint8_t(2)}) {
+      for (const auto & chain : chains) {
+        std::vector<ProcessorSlot> slots(chain.size());
+        std::string label;
+        for (size_t i = 0; i < chain.size(); ++i) {
+          CHECK(parse_processor_spec(chain[i], slots[i]).ok());
+          label += (i ? "," : "") + chain[i];
+        }
+        std::unique_ptr<ProcessingPipeline> pl;
+        CHECK(build_pipeline(slots, pl).ok());
+        CHECK(pl->prepare(ctx(rate, ch)).empty());
+        const size_t blk = rate / 100, nblk = 200;
+        auto in = noise(blk * nblk * ch, 6000, 777);
+        std::vector<int16_t> out(in.size());
+        for (size_t b = 0; b < nblk; ++b) {
+          AudioFrame f = block_from(in.data() + b * blk * ch, rate, ch);
+          pl->process(f, ctx(rate, ch));
+          std::memcpy(out.data() + b * blk * ch, f.data->data(), blk * ch * 2);
+        }
+        // Channel 0, skip the first second, search lags 0..50 ms.
+        size_t best = 0;
+        double bestv = -1e300;
+        const size_t n0 = rate, n = rate / 2;
+        for (size_t lag = 0; lag < rate / 20; ++lag) {
+          double acc = 0;
+          for (size_t i = 0; i < n; ++i)
+            acc += double(out[(n0 + i + lag) * ch]) * in[(n0 + i) * ch];
+          if (acc > bestv) {
+            bestv = acc;
+            best = lag;
+          }
+        }
+        if (best != pl->latency_frames()) {
+          std::printf("  [%s] @%u Hz %u ch: measured %zu frames, latency_frames() %u\n",
+              label.c_str(), rate, ch, best, pl->latency_frames());
+        }
+        CHECK(best == pl->latency_frames());
+      }
+    }
+  }
+  std::printf(
+      "PASS test_latency_matches_measurement (%zu chains x 4 rates x 2 channel counts, "
+      "%s)\n",
+      chains.size(), webrtc_implementation().c_str());
+}
+
 }  // namespace
 
 int main()
@@ -408,6 +468,7 @@ int main()
   test_vad_silence_and_speech();
   test_vad_failure_never_blocks_pcm();
   test_ns_vad_chain_through_capture_backend();
+  test_latency_matches_measurement();
   std::printf("all core_webrtc_processors_test cases passed\n");
   return 0;
 }

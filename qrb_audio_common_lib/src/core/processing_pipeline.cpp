@@ -101,6 +101,31 @@ std::vector<std::string> ProcessingPipeline::prepare(const ProcessingContext & c
   return bypassed;
 }
 
+uint32_t ProcessingPipeline::latency_frames() const
+{
+  uint32_t total = 0;
+  for (size_t i = 0; i < processors_.size(); ++i) {
+    if (stats_[i].health != ProcessorHealth::kFailed)
+      total += processors_[i].processor->latency_frames();
+  }
+  return total;
+}
+
+bool ProcessingPipeline::needs_reference() const
+{
+  for (size_t i = 0; i < processors_.size(); ++i) {
+    if (stats_[i].health != ProcessorHealth::kFailed && processors_[i].processor->needs_reference())
+      return true;
+  }
+  return false;
+}
+
+void ProcessingPipeline::snapshot_diagnostics()
+{
+  for (size_t i = 0; i < processors_.size(); ++i)
+    stats_[i].diagnostics = processors_[i].processor->diagnostics();
+}
+
 void ProcessingPipeline::reset_all()
 {
   for (size_t i = 0; i < processors_.size(); ++i) {

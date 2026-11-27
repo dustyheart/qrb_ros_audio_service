@@ -47,6 +47,13 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
 
   declare_backend_parameters();
   apply_backend_parameters();
+  {
+    std::string names;
+    for (const auto & n : qrb::audio_common_lib::core::known_processor_names())
+      names += (names.empty() ? "" : ", ") + n;
+    RCLCPP_INFO(this->get_logger(), "capture processing: %s; available processors: %s",
+        qrb::audio_common_lib::core::webrtc_implementation().c_str(), names.c_str());
+  }
 
   param_callback_handle_ =
       this->add_on_set_parameters_callback([this](const std::vector<rclcpp::Parameter> & params) {
@@ -64,7 +71,8 @@ AudioServer::AudioServer(const rclcpp::NodeOptions & options)
                      param.get_name() == "playback_buffer_duration_ms" ||
                      param.get_name() == "capture_processors" || param.get_name() == "ns_level" ||
                      param.get_name() == "vad_likelihood" ||
-                     param.get_name() == "vad_hangover_ms") {
+                     param.get_name() == "vad_hangover_ms" ||
+                     param.get_name() == "aec_reference_device") {
             backend_param_changed = true;
           }
         }
@@ -456,8 +464,9 @@ void AudioServer::declare_backend_parameters()
       "Processing chain for streaming capture (pub_pcm) streams, in order. Each entry is "
       "\"name\" or \"name:key=value,key=value\". Empty means no processing. Applies to "
       "streams created afterwards. Known names: passthrough, test_delay (test only), ns, vad (if "
-      "built with "
-      "webrtc-audio-processing; recommended order ns, vad; see ns_level/vad_* params).";
+      "built with webrtc-audio-processing), aec (webrtc-audio-processing 1.x only). Order: aec, "
+      "ns, vad ('aec' after 'ns'/'vad' is rejected; 'aec' directly followed by 'ns' runs as one "
+      "combined APM stage). See ns_level, vad_*, aec_reference_device.";
   this->declare_parameter<std::vector<std::string>>(
       "capture_processors", std::vector<std::string>{}, processors_desc);
 
@@ -489,6 +498,16 @@ void AudioServer::declare_backend_parameters()
       "<pcm topic_name><vad_topic_suffix> (stage-5 stopgap, see audio_service.hpp). Applies to "
       "streams created afterwards.";
   this->declare_parameter<std::string>("vad_topic_suffix", "_vad", vad_topic_desc);
+
+  rcl_interfaces::msg::ParameterDescriptor aec_ref_desc;
+  aec_ref_desc.description =
+      "Echo reference for the 'aec' capture processor: the capture source that carries what the "
+      "speaker plays, normally a sink monitor (e.g. "
+      "alsa_output.platform-sound.HiFi__hw_LEMANSEVK_0__sink.monitor). Default "
+      "@DEFAULT_MONITOR@ = monitor of the default sink. If it cannot be opened, stalls or "
+      "disappears, the capture stream keeps running and AEC passes audio through (logged). A "
+      "reference_device key in the 'aec' entry itself wins.";
+  this->declare_parameter<std::string>("aec_reference_device", "@DEFAULT_MONITOR@", aec_ref_desc);
 }
 
 qrb::audio_common_lib::core::Result AudioServer::parse_processor_specs(
@@ -581,8 +600,12 @@ qrb::audio_common_lib::core::Result AudioServer::build_backend_defaults(
   const std::string vad_likelihood = pending_or_current_string(this, pending, "vad_likelihood");
   const std::string vad_hangover =
       std::to_string(pending_or_current_int(this, pending, "vad_hangover_ms"));
+  const std::string aec_reference =
+      pending_or_current_string(this, pending, "aec_reference_device");
   for (auto & slot : defaults.capture_processors) {
-    if (slot.name == "ns") {
+    if (slot.name == "aec") {
+      slot.config.emplace("reference_device", aec_reference);
+    } else if (slot.name == "ns") {
       slot.config.emplace("level", ns_level);  // emplace: keys from the spec win
     } else if (slot.name == "vad") {
       slot.config.emplace("likelihood", vad_likelihood);

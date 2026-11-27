@@ -16,6 +16,7 @@
 #include "qrb_audio_common_lib/core/audio_capture_backend.hpp"
 #include "qrb_audio_common_lib/core/chunk_reframer.hpp"
 #include "qrb_audio_common_lib/core/processing_pipeline.hpp"
+#include "qrb_audio_common_lib/core/reference_buffer.hpp"
 
 namespace qrb
 {
@@ -55,15 +56,33 @@ struct CaptureProcessingStats
 // FrameCallback runs on the worker thread. stop() stops the inner backend
 // first (no more input), then drains the queue, flushes the reframer and
 // joins the worker; after stop() returns the callback is never invoked again.
+//
+// Echo reference (stage 6): if the pipeline has a stage that
+// needs_reference() (AEC) and a `reference` backend was given, configure()
+// opens it on config.reference_device (mono, sample_rate, 10 ms fragments,
+// timestamps on) and start() starts it BEFORE the mic stream; its chunks go
+// into a ReferenceBuffer that the AEC stage reads (ProcessingContext::
+// reference). The reference is best effort: if it cannot be opened/started,
+// stalls or dies, the mic stream keeps running and the AEC stage passes audio
+// through (flagged kBypassed, logged) - it never fails the stream.
+//
+// Timestamps: when a stage needs the reference, the mic backend is
+// configured with need_timestamp=true regardless of the request (pairing
+// needs capture times); they are stripped again before delivery if the
+// caller did not ask for them. Delivered non-zero timestamps are moved back
+// by the pipeline's latency_frames() (APM delay), so they keep meaning
+// "capture time of the audio in the first sample".
 class ProcessingCaptureBackend : public IAudioCaptureBackend
 {
 public:
   static constexpr size_t kDefaultQueueCapacity = 64;
 
   // `pipeline` may be null or empty (pass-through, thread decoupling only).
+  // `reference` is only used when the pipeline needs_reference().
   ProcessingCaptureBackend(std::unique_ptr<IAudioCaptureBackend> inner,
       std::unique_ptr<ProcessingPipeline> pipeline,
-      size_t queue_capacity = kDefaultQueueCapacity);
+      size_t queue_capacity = kDefaultQueueCapacity,
+      std::unique_ptr<IAudioCaptureBackend> reference = nullptr);
   ~ProcessingCaptureBackend() override;
 
   Result configure(const AudioStreamConfig & config) override;
@@ -75,16 +94,29 @@ public:
   // `processors` are filled in when the worker exits, i.e. after stop().
   CaptureProcessingStats stats() const;
 
+  // Pipeline delay subtracted from delivered timestamps (usec); valid after
+  // configure().
+  uint64_t latency_compensation_usec() const { return latency_usec_; }
+  // Null unless a stage needs the reference (valid after configure()).
+  const ReferenceBuffer * reference_buffer() const { return reference_buffer_.get(); }
+
 private:
   void enqueue(const AudioFrame & frame);
   void worker_loop();
   void deliver(AudioFrame && frame);
   void shutdown_worker();
+  void on_reference_frame(const AudioFrame & frame);
 
   std::unique_ptr<IAudioCaptureBackend> inner_;
   std::unique_ptr<ProcessingPipeline> pipeline_;
   std::unique_ptr<ChunkReframer> reframer_;
   const size_t queue_capacity_;
+
+  std::unique_ptr<IAudioCaptureBackend> reference_;
+  std::unique_ptr<ReferenceBuffer> reference_buffer_;
+  bool reference_running_ = false;
+  bool strip_timestamps_ = false;  // forced on for pairing, not requested
+  uint64_t latency_usec_ = 0;
 
   AudioStreamConfig config_;
   ProcessingContext context_;

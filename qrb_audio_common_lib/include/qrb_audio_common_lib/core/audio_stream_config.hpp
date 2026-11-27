@@ -52,6 +52,17 @@ struct AudioStreamConfig
   bool need_timestamp = false;
 
   std::vector<ProcessorSlot> processors;  // empty = passthrough, no processing pipeline
+
+  // Echo reference for an "aec" stage (ignored without one): the capture
+  // source carrying what the speaker plays, normally a sink monitor.
+  // "@DEFAULT_MONITOR@" = monitor of the default sink. Captured mono at
+  // sample_rate by ProcessingCaptureBackend's reference backend.
+  std::string reference_device = "@DEFAULT_MONITOR@";
+  // Reference/mic pairing bias towards newer reference (ReferenceBuffer).
+  uint32_t reference_lead_ms = 5;
+  // Re-place the reference by timestamps when sample counting has drifted
+  // further than this; 0 = never (ReferenceBuffer::Options).
+  uint32_t reference_resync_ms = 40;
 };
 
 }  // namespace core

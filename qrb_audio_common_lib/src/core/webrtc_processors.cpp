@@ -9,6 +9,7 @@
 
 #include "webrtc/modules/audio_processing/include/audio_processing.h"
 #include "webrtc/modules/interface/module_common_types.h"
+#include "webrtc_common.hpp"
 
 namespace qrb
 {
@@ -19,59 +20,33 @@ namespace core
 
 namespace
 {
+using webrtc_common::kNsLevels;
+using webrtc_common::kVadLikelihoods;
+using webrtc_common::parse_choice;
 
-bool parse_choice(const ProcessorConfig & config,
-    const std::string & key,
-    const char * const * names,
-    int count,
-    int & out,
-    Result & err,
-    const std::string & who)
+// Input->output delay of the 0.3.1 APM with NS enabled, sample frames,
+// measured on QCS9075 by cross-correlating white noise (stage 6); the same
+// with or without the high-pass filter. VAD-only stages hand back no audio.
+uint32_t ns_latency_frames(uint32_t rate)
 {
-  auto it = config.find(key);
-  if (it == config.end())
-    return true;
-  for (int i = 0; i < count; ++i) {
-    if (it->second == names[i]) {
-      out = i;
-      return true;
-    }
+  switch (rate) {
+    case 8000:
+      return 48;
+    case 16000:
+      return 96;
+    case 32000:
+      return 196;
+    case 48000:
+      return 334;
+    default:
+      return 0;
   }
-  std::string allowed;
-  for (int i = 0; i < count; ++i)
-    allowed += std::string(i ? ", " : "") + names[i];
-  err = Result::Error(ErrorCode::kInvalidConfig,
-      who + ": " + key + " must be one of " + allowed + ", got '" + it->second + "'");
-  return false;
 }
-
-const char * const kNsLevels[] = {"low", "moderate", "high", "very_high"};
-const char * const kVadLikelihoods[] = {"very_low", "low", "moderate", "high"};
-
 }  // namespace
 
 Result check_webrtc_format(const ProcessingContext & c)
 {
-  if (c.sample_format != 16) {
-    return Result::Error(ErrorCode::kUnsupportedFormat,
-        "WebRTC APM needs 16-bit samples, stream is " + std::to_string(c.sample_format) + "-bit");
-  }
-  if (c.sample_rate != 8000 && c.sample_rate != 16000 && c.sample_rate != 32000 &&
-      c.sample_rate != 48000) {
-    return Result::Error(
-        ErrorCode::kUnsupportedFormat, "WebRTC APM needs 8000/16000/32000/48000 Hz, stream is " +
-                                           std::to_string(c.sample_rate) + " Hz");
-  }
-  if (c.channels < 1 || c.channels > 2) {
-    return Result::Error(ErrorCode::kUnsupportedFormat,
-        "WebRTC processors support 1 or 2 channels, stream has " + std::to_string(c.channels));
-  }
-  if (c.frame_duration_ms != 10) {
-    return Result::Error(
-        ErrorCode::kUnsupportedFormat, "WebRTC APM needs 10 ms blocks, pipeline block is " +
-                                           std::to_string(c.frame_duration_ms) + " ms");
-  }
-  return Result::Ok();
+  return webrtc_common::check_format(c);
 }
 
 WebRtcApmStage::WebRtcApmStage() = default;
@@ -185,6 +160,11 @@ Result WebRtcNsProcessor::enable_component(webrtc::AudioProcessing & apm)
 ProcessResult WebRtcNsProcessor::process(AudioFrame & frame, const ProcessingContext & context)
 {
   return run(frame, context, true);
+}
+
+uint32_t WebRtcNsProcessor::latency_frames() const
+{
+  return apm_ ? ns_latency_frames(prepared_.sample_rate) : 0;
 }
 
 Result WebRtcVadProcessor::configure(const ProcessorConfig & config)

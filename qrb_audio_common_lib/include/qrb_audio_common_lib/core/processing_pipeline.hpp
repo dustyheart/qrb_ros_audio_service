@@ -33,6 +33,8 @@ struct ProcessorStats
   uint64_t max_process_usec = 0;
   // configure() failure reason ("[code] message"), empty when healthy.
   std::string init_error;
+  // IAudioProcessor::diagnostics(), captured by snapshot_diagnostics().
+  std::string diagnostics;
 };
 
 // Runs a fixed, ordered list of IAudioProcessor stages over each AudioFrame.
@@ -72,6 +74,18 @@ public:
   std::vector<std::string> prepare(const ProcessingContext & context);
 
   void reset_all();
+
+  // Sum of latency_frames() over the stages that run (not kFailed). Call
+  // after prepare(). A stage that degrades later stops adding its delay;
+  // that rare case is logged by the backend, not compensated.
+  uint32_t latency_frames() const;
+
+  // True if any configured stage needs_reference().
+  bool needs_reference() const;
+
+  // Copies every stage's diagnostics() into stats(); call from the thread
+  // that drives process().
+  void snapshot_diagnostics();
 
   size_t processor_count() const { return processors_.size(); }
   const std::vector<ProcessorStats> & stats() const { return stats_; }

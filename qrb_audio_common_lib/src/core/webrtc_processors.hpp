@@ -1,9 +1,12 @@
 // Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 //
-// Internal header (not installed): only compiled when CMake found
-// webrtc-audio-processing (QRB_AUDIO_HAVE_WEBRTC_APM). Users get these through
-// core::create_processor("ns" / "vad").
+// Internal header (not installed): the LEGACY implementation on the system
+// webrtc-audio-processing 0.3.1 (QRB_AUDIO_WEBRTC_IMPL=legacy, or auto when
+// 1.x is not found). Users get these through core::create_processor("ns" /
+// "vad"). With webrtc-audio-processing 1.x, webrtc1_processors.* replaces this
+// file entirely (the two libraries export ~400 identical symbols and must
+// never be linked into one process).
 
 #ifndef QRB_AUDIO_COMMON_LIB__SRC__CORE__WEBRTC_PROCESSORS_HPP_
 #define QRB_AUDIO_COMMON_LIB__SRC__CORE__WEBRTC_PROCESSORS_HPP_
@@ -69,6 +72,7 @@ public:
   std::string name() const override { return "ns"; }
   Result configure(const ProcessorConfig & config) override;
   ProcessResult process(AudioFrame & frame, const ProcessingContext & context) override;
+  uint32_t latency_frames() const override;
 
 private:
   Result enable_component(webrtc::AudioProcessing & apm) override;
