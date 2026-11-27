@@ -12,6 +12,8 @@
   <depend>libasound2-dev</depend>
   <depend>libpulse-dev</depend>
   <depend>libsndfile1-dev</depend>
+  <!-- webrtc-audio-processing 1.x (AEC3) for the aec/ns/vad capture processors. -->
+  <depend>webrtc_audio_processing_vendor</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

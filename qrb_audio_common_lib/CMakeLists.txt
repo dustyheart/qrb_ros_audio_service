@@ -20,9 +20,11 @@ pkg_check_modules(SNDFILE REQUIRED sndfile)
 #            libwebrtc-audio-processing-dev): "ns", "vad" only, no AEC.
 #   auto   - v1 if found, else legacy if found, else none.
 # The two libraries export ~400 identical symbols, so exactly one is ever
-# linked (stage 6, aec3_ab_test.md). 1.x is not packaged for Ubuntu 24.04:
-# build it (meson) and point QRB_AUDIO_WEBRTC1_PREFIX (or PKG_CONFIG_PATH) at
-# its install prefix; the library is then found through an RPATH.
+# linked (stage 6, aec3_ab_test.md). 1.x is not packaged for Ubuntu 24.04; it
+# comes from the webrtc_audio_processing_vendor package in this repository
+# (found automatically), or from any install prefix given in
+# QRB_AUDIO_WEBRTC1_PREFIX / PKG_CONFIG_PATH. The library is found at run time
+# through an RPATH.
 option(QRB_AUDIO_ENABLE_WEBRTC "Build WebRTC capture processors if a webrtc-audio-processing is found" ON)
 set(QRB_AUDIO_WEBRTC_IMPL "auto" CACHE STRING "WebRTC implementation: auto, v1 or legacy")
 set_property(CACHE QRB_AUDIO_WEBRTC_IMPL PROPERTY STRINGS auto v1 legacy)
@@ -34,9 +36,18 @@ if(QRB_AUDIO_ENABLE_WEBRTC)
     message(FATAL_ERROR "QRB_AUDIO_WEBRTC_IMPL must be auto, v1 or legacy, got '${QRB_AUDIO_WEBRTC_IMPL}'")
   endif()
   if(QRB_AUDIO_WEBRTC_IMPL MATCHES "^(auto|v1)$")
-    if(QRB_AUDIO_WEBRTC1_PREFIX)
-      file(GLOB _qrb_webrtc1_pc_dirs "${QRB_AUDIO_WEBRTC1_PREFIX}/lib/pkgconfig"
-           "${QRB_AUDIO_WEBRTC1_PREFIX}/lib/*/pkgconfig")
+    set(_qrb_webrtc1_prefix "${QRB_AUDIO_WEBRTC1_PREFIX}")
+    if(NOT _qrb_webrtc1_prefix)
+      find_package(webrtc_audio_processing_vendor QUIET)
+      if(webrtc_audio_processing_vendor_FOUND)
+        # <prefix>/share/webrtc_audio_processing_vendor/cmake -> <prefix>
+        get_filename_component(_qrb_webrtc1_prefix
+          "${webrtc_audio_processing_vendor_DIR}/../../.." ABSOLUTE)
+      endif()
+    endif()
+    if(_qrb_webrtc1_prefix)
+      file(GLOB _qrb_webrtc1_pc_dirs "${_qrb_webrtc1_prefix}/lib/pkgconfig"
+           "${_qrb_webrtc1_prefix}/lib/*/pkgconfig")
       foreach(_d ${_qrb_webrtc1_pc_dirs})
         set(ENV{PKG_CONFIG_PATH} "${_d}:$ENV{PKG_CONFIG_PATH}")
       endforeach()
@@ -46,7 +57,8 @@ if(QRB_AUDIO_ENABLE_WEBRTC)
       set(QRB_AUDIO_WEBRTC "v1")
     elseif(QRB_AUDIO_WEBRTC_IMPL STREQUAL "v1")
       message(WARNING "qrb_audio_common_lib: QRB_AUDIO_WEBRTC_IMPL=v1 but webrtc-audio-processing-1 "
-                      "was not found (set QRB_AUDIO_WEBRTC1_PREFIX); building without WebRTC processors.")
+                      "was not found (build webrtc_audio_processing_vendor or set "
+                      "QRB_AUDIO_WEBRTC1_PREFIX); building without WebRTC processors.")
     endif()
   endif()
   if(QRB_AUDIO_WEBRTC STREQUAL "none" AND QRB_AUDIO_WEBRTC_IMPL MATCHES "^(auto|legacy)$")
@@ -62,8 +74,8 @@ elseif(QRB_AUDIO_WEBRTC STREQUAL "legacy")
   message(STATUS "qrb_audio_common_lib: WebRTC NS/VAD enabled, no AEC (webrtc-audio-processing ${WEBRTC_APM_VERSION})")
 elseif(QRB_AUDIO_ENABLE_WEBRTC)
   message(WARNING "qrb_audio_common_lib: no webrtc-audio-processing found - 'aec'/'ns'/'vad' capture "
-                  "processors are disabled. Build webrtc-audio-processing 1.x (set "
-                  "QRB_AUDIO_WEBRTC1_PREFIX) or install libwebrtc-audio-processing-dev (ns/vad only).")
+                  "processors are disabled. Build webrtc_audio_processing_vendor (needs meson, "
+                  "ninja) or install libwebrtc-audio-processing-dev (ns/vad only).")
 else()
   message(STATUS "qrb_audio_common_lib: WebRTC processors disabled (QRB_AUDIO_ENABLE_WEBRTC=OFF)")
 endif()
