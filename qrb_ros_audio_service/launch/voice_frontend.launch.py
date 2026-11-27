@@ -31,6 +31,9 @@ Examples:
 
   # NS + VAD only (no echo cancellation, e.g. no speaker on the device)
   ros2 launch qrb_ros_audio_service voice_frontend.launch.py capture_processors:=ns,vad
+
+  # Raw capture, no processing (and therefore no VAD topic)
+  ros2 launch qrb_ros_audio_service voice_frontend.launch.py capture_processors:=none
 """
 
 from launch import LaunchDescription
@@ -50,7 +53,7 @@ _SERVICE_ARGS = [
      'Smaller = lower latency, more messages.'),
     ('capture_processors', 'aec,ns,vad',
      'Comma-separated processing chain, in this order: aec, ns, vad. '
-     'Each entry may carry overrides, e.g. "ns:level=high". Empty = no processing.'),
+     'Each entry may carry overrides, e.g. "ns:level=high". "none" = no processing.'),
     ('ns_level', 'moderate', 'Noise suppression level: low, moderate, high, very_high.'),
     ('vad_likelihood', 'very_low',
      'VAD aggressiveness: very_low, low, moderate, high (higher = reports voice more readily).'),
@@ -84,7 +87,9 @@ def _service(context):
         'vad_topic_suffix': val('vad_topic_suffix'),
         'aec_reference_device': val('aec_reference_device'),
     }
-    chain = [s.strip() for s in val('capture_processors').split(',') if s.strip()]
+    chain_arg = val('capture_processors').strip()
+    # "none": ros2 launch cannot take an empty value on the command line.
+    chain = [] if chain_arg.lower() == 'none' else         [s.strip() for s in chain_arg.split(',') if s.strip()]
     # An empty list cannot be typed as a string array by launch; leaving the
     # parameter unset gives the node default (empty chain = no processing).
     if chain:

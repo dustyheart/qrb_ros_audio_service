@@ -38,7 +38,7 @@ class VoiceFrontendClient(Node):
     def __init__(self, args):
         super().__init__('voice_frontend_client')
         self.args = args
-        self.handle = 0
+        self.stream_handle = 0
         self.cli = self.create_client(AudioRequest, 'audio_server')
         qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(AudioData, args.topic, self.on_pcm, qos)
@@ -67,7 +67,11 @@ class VoiceFrontendClient(Node):
         fut = self.cli.call_async(req)
         rclpy.spin_until_future_complete(self, fut, timeout_sec=timeout)
         res = fut.result()
-        if res is None or not res.success:
+        if res is None:
+            self.cli.remove_pending_request(fut)
+            self.get_logger().error(f'"{command}": no response within {timeout} s')
+            return None
+        if not res.success:
             self.get_logger().error(f'"{command}" failed (see the audio service log for the reason)')
             return None
         return res
@@ -81,31 +85,35 @@ class VoiceFrontendClient(Node):
                                  sample_rate=self.args.sample_rate, sample_format=16))
         if res is None:
             return False
-        self.handle = res.stream_handle
-        if self.request('start', stream_handle=self.handle) is None:
+        self.stream_handle = res.stream_handle
+        if self.request('start', stream_handle=self.stream_handle) is None:
             self.close_stream()
             return False
         self.t0 = time.time()
         self.get_logger().info(
-            f'stream {self.handle} started: {self.args.sample_rate} Hz, {self.args.channels} ch, '
+            f'stream {self.stream_handle} started: {self.args.sample_rate} Hz, {self.args.channels} ch, '
             f'PCM on "{self.args.topic}", VAD on "{self.args.topic + self.args.vad_suffix}"')
         self.create_timer(1.0, self.report)
         return True
 
     def close_stream(self):
-        if self.handle:
-            # Short timeouts: on Ctrl+C under ros2 launch the service may be exiting too.
-            self.request('stop', timeout=3.0, stream_handle=self.handle)
-            self.request('release', timeout=3.0, stream_handle=self.handle)
-            self.get_logger().info(f'stream {self.handle} released')
-            self.handle = 0
+        if self.stream_handle:
+            # On Ctrl+C under ros2 launch the service receives SIGINT too and
+            # tears its streams down itself; don't wait for it.
+            if (self.request('stop', timeout=1.5, stream_handle=self.stream_handle) and
+                    self.request('release', timeout=1.5, stream_handle=self.stream_handle)):
+                self.get_logger().info(f'stream {self.stream_handle} released')
+            else:
+                self.get_logger().warn('audio service not answering (shutting down?); '
+                                       'it releases its streams on exit')
+            self.stream_handle = 0
         if self.wav:
             self.wav.close()
             self.wav = None
 
     # ---- data ----
     def on_pcm(self, msg):
-        if msg.stream_handle != self.handle:
+        if msg.stream_handle != self.stream_handle:
             return
         samples = array.array('h', bytes(msg.data))
         if sys.byteorder == 'big':
