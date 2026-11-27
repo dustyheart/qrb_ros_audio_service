@@ -496,8 +496,17 @@ uint32_t PulseCommonStream::audio_stream_open(const AudioStreamInfo & stream_inf
   return IAudioStream::register_stream(stream);
 }
 
+// Thread safety: every pa_stream_* / pa_context_* call below runs on a ROS
+// service or subscription thread, while the threaded mainloop concurrently
+// dispatches events for ALL streams of the process. libpulse requires the
+// threaded-mainloop lock for every such call made outside the mainloop thread.
+// The original code took it only around the wait loops; with two streams
+// starting back to back (AEC mic + echo reference) this aborted the process
+// in pa_queue_pop() ("Assertion '!e->next' failed") after ~80
+// create/start/stop/release cycles on the board.
 void PulseCommonStream::init_pulse_stream()
 {
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   pa_channel_map channel_map;
 
   pa_channel_map_init_extend(&channel_map, sample_spec->channels, PA_CHANNEL_MAP_DEFAULT);
@@ -524,6 +533,7 @@ int PulseCommonStream::pause_stream(bool pause)
     return -1;
   }
 
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   pa_operation * op_pause = pa_stream_cork(stream_handle_, pause, nullptr, nullptr);
   if (op_pause)
     pa_operation_unref(op_pause);
@@ -533,13 +543,16 @@ int PulseCommonStream::pause_stream(bool pause)
 
 int PulseCommonStream::mute_stream(bool mute)
 {
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   uint32_t stream_index = pa_stream_get_index(stream_handle_);
   pa_operation * op = pa_context_set_sink_input_mute(
       PulseCommonStream::pulse_context_, stream_index, mute, nullptr, nullptr);
-  if (!op) {
+  if (op) {
+    pa_operation_unref(op);  // was leaked on success
+  } else {
+    // was pa_operation_unref(nullptr) here, an assertion failure in libpulse
     LOGE("failed to set stream(%p) to %s", static_cast<void *>(stream_handle_),
         mute ? "mute" : "unmute");
-    pa_operation_unref(op);
   }
 
   return 0;
@@ -562,11 +575,11 @@ int PulseCommonStream::stop_stream()
   PulseCommonStream::deregister_stream_timestamp_event(this);
   repeat_count = 0;
 
+  // One lock for disconnect + wait (the wait needs the lock held exactly once).
+  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
   if (pa_stream_disconnect(stream_handle_) < 0) {
     LOGE("Disconnect Stream fail");
   }
-
-  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
   while (stream_state_ != PA_STREAM_TERMINATED)
     pa_threaded_mainloop_wait(PulseCommonStream::pulse_mainloop_);
   pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
@@ -590,6 +603,7 @@ int PulseCommonStream::close_stream()
     return -EPERM;
   }
   if (stream_handle_) {
+    MainloopLock lock(PulseCommonStream::pulse_mainloop_);
     pa_stream_set_state_callback(stream_handle_, nullptr, nullptr);
     pa_stream_set_underflow_callback(stream_handle_, nullptr, nullptr);
     pa_stream_set_overflow_callback(stream_handle_, nullptr, nullptr);
@@ -655,6 +669,7 @@ PlaybackStream::PlaybackStream(string filepath,
   init_pulse_stream();
 
   if (!file_path.empty()) {
+    MainloopLock lock(PulseCommonStream::pulse_mainloop_);
     pa_stream_set_write_callback(get_stream_handle(), PlaybackStream::stream_data_callback, this);
   }
 }
@@ -683,6 +698,7 @@ int PlaybackStream::start_stream()
   pa_cvolume_set(&volume, sample_spec->channels, PA_VOLUME_NORM * stream_volume / STREAM_VOL_MAX);
 
   const char * sink_name = device.empty() ? nullptr : device.c_str();
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   if (pa_stream_connect_playback(
           get_stream_handle(), sink_name, &buffer_attr, flags, &volume, nullptr)) {
     LOGE("pa_stream_connect_playback() failed: %s",
@@ -762,6 +778,7 @@ int PlaybackStream::write_data(const void * buf, size_t length)
   size_t bytes_written;
   int bytes_total_written = 0;
 
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);  // called from a ROS subscription thread
   if (get_stream_state() == PA_STREAM_READY) {
     size_t remaining = length;
     while (remaining > 0) {
@@ -845,6 +862,7 @@ CaptureStream::CaptureStream(string filepath,
 
   init_pulse_stream();
 
+  MainloopLock lock(PulseCommonStream::pulse_mainloop_);
   pa_stream_set_read_callback(get_stream_handle(), CaptureStream::stream_data_callback, this);
 }
 
@@ -874,30 +892,35 @@ int CaptureStream::start_stream()
       PA_VOLUME_NORM * stream_volume / STREAM_VOL_MAX * RECORD_GAIN);
 
   const char * source_name = device.empty() ? nullptr : device.c_str();
+  // One lock for connect + wait + volume (the wait needs the lock held exactly once).
+  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
   if (pa_stream_connect_record(stream, source_name, &buffer_attr, flags)) {
     LOGE("pa_stream_connect_record() failed: %s",
         pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
+    pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
     return -EIO;
   }
 
   // Must also stop on FAILED/TERMINATED: waiting for READY alone never
   // returns if the server rejects the stream (pulse_stream_state_callback
   // still signals the mainloop on those transitions).
-  pa_threaded_mainloop_lock(PulseCommonStream::pulse_mainloop_);
   while (get_stream_state() != PA_STREAM_READY && get_stream_state() != PA_STREAM_FAILED &&
          get_stream_state() != PA_STREAM_TERMINATED)
     pa_threaded_mainloop_wait(PulseCommonStream::pulse_mainloop_);
-  pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
 
   if (get_stream_state() != PA_STREAM_READY) {
     LOGE("capture stream failed to connect (state %d): %s", get_stream_state(),
         pa_strerror(pa_context_errno(PulseCommonStream::pulse_context_)));
+    pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
     return -EIO;
   }
 
   uint32_t stream_index = pa_stream_get_index(stream);
-  pa_context_set_source_output_volume(
+  pa_operation * op = pa_context_set_source_output_volume(
       PulseCommonStream::pulse_context_, stream_index, &volume, nullptr, nullptr);
+  if (op)
+    pa_operation_unref(op);  // was leaked on every start
+  pa_threaded_mainloop_unlock(PulseCommonStream::pulse_mainloop_);
 
   return 0;
 }
